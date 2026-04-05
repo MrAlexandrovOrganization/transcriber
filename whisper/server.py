@@ -20,6 +20,10 @@ logger = logging.getLogger(__name__)
 _JOB_TTL_S = int(os.getenv("JOB_TTL_S", "7200"))  # 2 hours
 
 
+class _CancelledError(Exception):
+    """Raised inside the worker when a job is cancelled mid-transcription."""
+
+
 @dataclasses.dataclass
 class _Job:
     job_id: str
@@ -29,6 +33,7 @@ class _Job:
     text: str = ""
     error: str = ""
     finished_at: float = 0.0  # time.monotonic() when done/failed, 0 while pending
+    cancelled: bool = False
 
 
 class TranscriptionServicer(whisper_pb2_grpc.TranscriptionServiceServicer):
@@ -125,6 +130,24 @@ class TranscriptionServicer(whisper_pb2_grpc.TranscriptionServiceServicer):
         )
 
     # ------------------------------------------------------------------
+    # Async RPC — Cancel
+    # ------------------------------------------------------------------
+
+    def Cancel(
+        self,
+        request: whisper_pb2.CancelRequest,
+        context: grpc.ServicerContext,
+    ) -> whisper_pb2.CancelResponse:
+        with self._jobs_lock:
+            job = self._jobs.get(request.job_id)
+            if job is None or job.status in ("done", "failed"):
+                return whisper_pb2.CancelResponse(cancelled=False)
+            job.cancelled = True
+
+        logger.info("Job cancel requested: %s (status=%s)", job.job_id, job.status)
+        return whisper_pb2.CancelResponse(cancelled=True)
+
+    # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
 
@@ -149,7 +172,7 @@ class TranscriptionServicer(whisper_pb2_grpc.TranscriptionServiceServicer):
         logger.info("File received: path=%s format=%s", tmp_path, fmt)
         return tmp_path, fmt
 
-    def _transcribe_file(self, tmp_path: str) -> str:
+    def _transcribe_file(self, tmp_path: str, job: _Job) -> str:
         segments, _ = self._model.transcribe(
             tmp_path,
             language="ru",
@@ -157,21 +180,44 @@ class TranscriptionServicer(whisper_pb2_grpc.TranscriptionServiceServicer):
             vad_filter=True,
             temperature=0.0,
         )
-        return " ".join(seg.text.strip() for seg in segments).strip()
+        parts = []
+        for seg in segments:
+            with self._jobs_lock:
+                if job.cancelled:
+                    raise _CancelledError()
+            parts.append(seg.text.strip())
+        return " ".join(parts).strip()
 
     def _worker(self) -> None:
         """Single background thread — one transcription at a time."""
         while True:
             job = self._job_queue.get()
-            logger.info("Processing job: %s", job.job_id)
             with self._jobs_lock:
-                job.status = "running"
+                if job.cancelled:
+                    logger.info("Job skipped (cancelled before start): %s", job.job_id)
+                    job.status = "failed"
+                    job.error = "cancelled"
+                    job.finished_at = time.monotonic()
+                else:
+                    logger.info("Processing job: %s", job.job_id)
+                    job.status = "running"
+
+            if job.status == "failed":
+                _safe_unlink(job.tmp_path)
+                self._job_queue.task_done()
+                continue
+
             try:
-                text = self._transcribe_file(job.tmp_path)
+                text = self._transcribe_file(job.tmp_path, job)
                 logger.info("Job done: id=%s chars=%d", job.job_id, len(text))
                 with self._jobs_lock:
                     job.status = "done"
                     job.text = text
+            except _CancelledError:
+                logger.info("Job cancelled mid-transcription: %s", job.job_id)
+                with self._jobs_lock:
+                    job.status = "failed"
+                    job.error = "cancelled"
             except Exception as e:
                 logger.error("Job failed: id=%s error=%s", job.job_id, e)
                 with self._jobs_lock:

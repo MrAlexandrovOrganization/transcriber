@@ -4,15 +4,19 @@ DOCKER_COMPOSE = docker compose
 install:
 	poetry install
 
-# Regenerate Python gRPC stubs from proto/whisper.proto
+# Validate proto (buf must be installed: brew install bufbuild/buf/buf).
+.PHONY: proto-lint
+proto-lint:
+	buf lint proto
+
+# Regenerate Python gRPC stubs from proto/whisper.proto.
+# proto/whisper.proto is the canonical source — edit it here, then run make proto.
 .PHONY: proto
-proto:
-	poetry run python -m grpc_tools.protoc \
+proto: proto-lint
+	.venv/bin/python -m grpc_tools.protoc \
 		-I . \
 		--python_out=. \
 		--grpc_python_out=. \
-		--mypy_out=. \
-		--mypy_grpc_out=. \
 		proto/whisper.proto
 
 .PHONY: up

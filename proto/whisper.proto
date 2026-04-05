@@ -13,6 +13,17 @@ service TranscriptionService {
 
   // Poll job status and retrieve result when done.
   rpc GetStatus(StatusRequest) returns (StatusResponse);
+
+  // Cancel a pending or running job.
+  rpc Cancel(CancelRequest) returns (CancelResponse);
+}
+
+message CancelRequest {
+  string job_id = 1;
+}
+
+message CancelResponse {
+  bool cancelled = 1;  // true if job was found and marked for cancellation
 }
 
 // Sent by the client one chunk at a time.
