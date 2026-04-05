@@ -1,0 +1,48 @@
+# Standalone Whisper transcription service.
+# Run independently: docker compose up -d
+#
+# Other projects connect by joining the external network "whisper-net":
+#
+#   networks:
+#     whisper-net:
+#       external: true
+#
+# Then set WHISPER_GRPC_HOST=whisper, WHISPER_GRPC_PORT=50053.
+# The port is NOT published to the host — only containers in whisper-net can reach it.
+
+networks:
+  whisper-net:
+    name: whisper-net
+
+services:
+  whisper:
+    build:
+      context: .
+      dockerfile: whisper/Dockerfile
+    environment:
+      - GRPC_PORT=50053
+      - WHISPER_MODEL=small
+      # Max seconds a request waits in queue when whisper is busy (default 600).
+      # - TRANSCRIBE_QUEUE_TIMEOUT_S=600
+    volumes:
+      - whisper-model-cache:/root/.cache/huggingface
+    restart: unless-stopped
+    networks:
+      - whisper-net
+    # No "ports:" — not accessible from host or public IP, only via whisper-net.
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import grpc
+          ch = grpc.insecure_channel('localhost:50053')
+          grpc.channel_ready_future(ch).result(timeout=5)
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+
+volumes:
+  whisper-model-cache:

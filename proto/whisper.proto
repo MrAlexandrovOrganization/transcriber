@@ -1,0 +1,56 @@
+syntax = "proto3";
+package whisper;
+
+option go_package = "transcriber-bot/gen/whisper";
+
+service TranscriptionService {
+  // Synchronous (legacy) — client streams audio, blocks until transcription is done.
+  rpc Transcribe(stream TranscribeChunk) returns (TranscribeResponse);
+
+  // Async — client streams audio, gets a job_id immediately.
+  // The job is processed in the background queue.
+  rpc Submit(stream TranscribeChunk) returns (SubmitResponse);
+
+  // Poll job status and retrieve result when done.
+  rpc GetStatus(StatusRequest) returns (StatusResponse);
+}
+
+// Sent by the client one chunk at a time.
+// The first chunk MUST have a non-empty format field ("ogg", "mp4", etc.).
+message TranscribeChunk {
+  bytes  data   = 1;
+  string format = 2;
+}
+
+// ---- Sync response ----
+
+message TranscribeResponse {
+  string text = 1;
+}
+
+// ---- Async submit ----
+
+message SubmitResponse {
+  string job_id         = 1;
+  int32  queue_position = 2;  // 1 = currently running, 2+ = waiting
+}
+
+// ---- Async status ----
+
+message StatusRequest {
+  string job_id = 1;
+}
+
+enum JobStatus {
+  PENDING = 0;
+  RUNNING = 1;
+  DONE    = 2;
+  FAILED  = 3;
+}
+
+message StatusResponse {
+  string    job_id = 1;
+  JobStatus status = 2;
+  string    text   = 3;   // populated when status == DONE
+  string    error  = 4;   // populated when status == FAILED
+}
