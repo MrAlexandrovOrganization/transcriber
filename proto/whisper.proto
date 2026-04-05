@@ -23,7 +23,7 @@ message CancelRequest {
 }
 
 message CancelResponse {
-  bool cancelled = 1;  // true if job was found and marked for cancellation
+  bool cancelled = 1; // true if job was found and marked for cancellation
 }
 
 // Sent by the client one chunk at a time.
@@ -43,7 +43,7 @@ message TranscribeResponse {
 
 message SubmitResponse {
   string job_id         = 1;
-  int32  queue_position = 2;  // 1 = currently running, 2+ = waiting
+  int32  queue_position = 2; // 1 = currently running, 2+ = waiting
 }
 
 // ---- Async status ----
@@ -62,6 +62,6 @@ enum JobStatus {
 message StatusResponse {
   string    job_id = 1;
   JobStatus status = 2;
-  string    text   = 3;   // populated when status == DONE
-  string    error  = 4;   // populated when status == FAILED
+  string    text   = 3; // populated when status == DONE
+  string    error  = 4; // populated when status == FAILED
 }
