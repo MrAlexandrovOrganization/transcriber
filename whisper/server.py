@@ -89,10 +89,8 @@ class TranscriptionServicer(whisper_pb2_grpc.TranscriptionServiceServicer):
         job = _Job(job_id=str(uuid.uuid4()), tmp_path=tmp_path, fmt=fmt)
         with self._jobs_lock:
             self._jobs[job.job_id] = job
-        self._job_queue.put(job)
-
-        # +1 because the item just entered the queue (qsize is post-put).
-        queue_position = self._job_queue.qsize()
+            self._job_queue.put(job)
+            queue_position = self._job_queue.qsize()
         logger.info("Job submitted: id=%s position=%d", job.job_id, queue_position)
         return whisper_pb2.SubmitResponse(job_id=job.job_id, queue_position=queue_position)
 
