@@ -13,10 +13,11 @@ proto-lint:
 # proto/whisper.proto is the canonical source — edit it here, then run make proto.
 .PHONY: proto
 proto: proto-lint
-	.venv/bin/python -m grpc_tools.protoc \
+	poetry run python -m grpc_tools.protoc \
 		-I . \
 		--python_out=. \
 		--grpc_python_out=. \
+		--pyi_out=. \
 		proto/whisper.proto
 
 .PHONY: up

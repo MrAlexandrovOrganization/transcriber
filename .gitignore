@@ -3,5 +3,6 @@
 *_pb2_grpc.pyi
 *_pb2.py
 *_pb2.pyi
+__pycache__
 
 bot/gen/
