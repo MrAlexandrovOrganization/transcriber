@@ -39,6 +39,11 @@ deploy:
 restart:
 	$(DOCKER_COMPOSE) restart whisper
 
+.PHONY: format
+format:
+	poetry run ruff check whisper --fix --unsafe-fixes
+	poetry run ruff format whisper
+
 .PHONY: clean
 clean:
 	find . -type f -name '*.pyc' -delete
