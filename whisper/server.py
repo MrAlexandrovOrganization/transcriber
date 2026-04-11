@@ -41,8 +41,13 @@ class TranscriptionServicer(whisper_pb2_grpc.TranscriptionServiceServicer):
         from faster_whisper import WhisperModel
 
         model_size = os.getenv("WHISPER_MODEL", "small")
-        logger.info("Loading Whisper model '%s'...", model_size)
-        self._model = WhisperModel(model_size, device="cpu", compute_type="int8")
+        cpu_threads = int(os.getenv("WHISPER_CPU_THREADS", "2"))
+        logger.info(
+            "Loading Whisper model '%s' (cpu_threads=%d)...", model_size, cpu_threads
+        )
+        self._model = WhisperModel(
+            model_size, device="cpu", compute_type="int8", cpu_threads=cpu_threads
+        )
         logger.info("Whisper model loaded.")
 
         self._jobs: dict[str, _Job] = {}

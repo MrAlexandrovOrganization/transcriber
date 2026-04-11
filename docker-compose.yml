@@ -22,8 +22,11 @@ services:
     environment:
       - GRPC_PORT=50053
       - WHISPER_MODEL=small
-      # Max seconds a request waits in queue when whisper is busy (default 600).
-      # - TRANSCRIBE_QUEUE_TIMEOUT_S=600
+      # CPU threads used by CTranslate2 for model inference.
+      # Set to the number of physical cores you want to allocate (default 2).
+      - WHISPER_CPU_THREADS=2
+      # gRPC I/O thread pool for handling concurrent file uploads (default 4).
+      - GRPC_WORKERS=4
     volumes:
       - whisper-model-cache:/root/.cache/huggingface
     restart: unless-stopped

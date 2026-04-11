@@ -19,9 +19,10 @@ _50MB = 50 * 1024 * 1024
 
 def serve():
     port = os.getenv("GRPC_PORT", "50053")
+    grpc_workers = int(os.getenv("GRPC_WORKERS", "4"))
     server = grpc.server(
-        # Multiple workers to receive files concurrently while one transcribes.
-        futures.ThreadPoolExecutor(max_workers=8),
+        # I/O-bound threads for receiving files concurrently while one transcribes.
+        futures.ThreadPoolExecutor(max_workers=grpc_workers),
         options=[
             ("grpc.max_receive_message_length", _50MB),
             ("grpc.max_send_message_length", _50MB),
