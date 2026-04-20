@@ -26,11 +26,26 @@ message CancelResponse {
   bool cancelled = 1; // true if job was found and marked for cancellation
 }
 
+// Transcription preset and optional overrides.
+// The backend applies the named preset's default parameters, then applies
+// any non-empty override fields on top.
+message TranscriptionOptions {
+  // Named preset: "auto", "voice", "lecture", "meeting".
+  // Empty string is treated as "auto".
+  string preset = 1;
+  // Override language (e.g. "ru", "en"). Empty = use preset default.
+  string language = 2;
+  // Override the initial prompt sent to the model. Empty = use preset default.
+  string initial_prompt = 3;
+}
+
 // Sent by the client one chunk at a time.
 // The first chunk MUST have a non-empty format field ("ogg", "mp4", etc.).
+// The first chunk MAY also carry transcription options.
 message TranscribeChunk {
-  bytes  data   = 1;
-  string format = 2;
+  bytes                data    = 1;
+  string               format  = 2; // first chunk: file format ("ogg", "mp4", etc.)
+  TranscriptionOptions options = 3; // first chunk: transcription options (optional)
 }
 
 // ---- Sync response ----
@@ -59,9 +74,17 @@ enum JobStatus {
   FAILED  = 3;
 }
 
+// A single transcribed segment with timing information.
+message Segment {
+  float  start = 1; // start time in seconds
+  float  end   = 2; // end time in seconds
+  string text  = 3; // transcribed text for this segment
+}
+
 message StatusResponse {
-  string    job_id = 1;
-  JobStatus status = 2;
-  string    text   = 3; // populated when status == DONE
-  string    error  = 4; // populated when status == FAILED
+  string           job_id   = 1;
+  JobStatus        status   = 2;
+  string           text     = 3; // plain text (all segments joined); populated when status == DONE
+  string           error    = 4; // populated when status == FAILED
+  repeated Segment segments = 5; // timestamped segments; populated when status == DONE (preset-dependent)
 }
