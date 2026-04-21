@@ -87,6 +87,7 @@ class _Job:
     text: str = ""
     error: str = ""
     segments: list[tuple[float, float, str]] = dataclasses.field(default_factory=list)
+    progress_percent: float = 0.0
     finished_at: float = 0.0  # time.monotonic() when done/failed, 0 while pending
     cancelled: bool = False
 
@@ -213,6 +214,7 @@ class TranscriptionServicer(whisper_pb2_grpc.TranscriptionServiceServicer):
             text=job.text,
             error=job.error,
             segments=segments,
+            progress_percent=job.progress_percent,
         )
 
     # ------------------------------------------------------------------
@@ -268,7 +270,8 @@ class TranscriptionServicer(whisper_pb2_grpc.TranscriptionServiceServicer):
 
         include_segments = job.preset == "lecture"
 
-        segments_iter, _ = self._model.transcribe(job.tmp_path, **params)
+        segments_iter, info = self._model.transcribe(job.tmp_path, **params)
+        total_duration = max(float(getattr(info, "duration", 0.0) or 0.0), 0.0)
         parts: list[str] = []
         segs: list[tuple[float, float, str]] = []
         for seg in segments_iter:
@@ -279,6 +282,10 @@ class TranscriptionServicer(whisper_pb2_grpc.TranscriptionServiceServicer):
             parts.append(text)
             if include_segments:
                 segs.append((seg.start, seg.end, text))
+            if total_duration > 0:
+                progress = min(max((float(seg.end) / total_duration) * 100.0, 0.0), 99.0)
+                with self._jobs_lock:
+                    job.progress_percent = progress
 
         return " ".join(parts).strip(), segs
 
@@ -297,6 +304,7 @@ class TranscriptionServicer(whisper_pb2_grpc.TranscriptionServiceServicer):
                         "Processing job: %s (preset=%s)", job.job_id, job.preset
                     )
                     job.status = "running"
+                    job.progress_percent = 0.0
 
             if job.status == "failed":
                 _safe_unlink(job.tmp_path)
@@ -315,16 +323,19 @@ class TranscriptionServicer(whisper_pb2_grpc.TranscriptionServiceServicer):
                     job.status = "done"
                     job.text = text
                     job.segments = segs
+                    job.progress_percent = 100.0
             except _CancelledError:
                 logger.info("Job cancelled mid-transcription: %s", job.job_id)
                 with self._jobs_lock:
                     job.status = "failed"
                     job.error = "cancelled"
+                    job.progress_percent = 0.0
             except Exception as e:
                 logger.error("Job failed: id=%s error=%s", job.job_id, e)
                 with self._jobs_lock:
                     job.status = "failed"
                     job.error = str(e)
+                    job.progress_percent = 0.0
             finally:
                 job.finished_at = time.monotonic()
                 _safe_unlink(job.tmp_path)

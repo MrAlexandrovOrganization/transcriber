@@ -82,9 +82,10 @@ message Segment {
 }
 
 message StatusResponse {
-  string           job_id   = 1;
-  JobStatus        status   = 2;
-  string           text     = 3; // plain text (all segments joined); populated when status == DONE
-  string           error    = 4; // populated when status == FAILED
-  repeated Segment segments = 5; // timestamped segments; populated when status == DONE (preset-dependent)
+  string           job_id            = 1;
+  JobStatus        status            = 2;
+  string           text              = 3; // plain text (all segments joined); populated when status == DONE
+  string           error             = 4; // populated when status == FAILED
+  repeated Segment segments          = 5; // timestamped segments; populated when status == DONE (preset-dependent)
+  float            progress_percent  = 6; // best-effort progress estimate for RUNNING jobs, 0..100
 }
