@@ -10,6 +10,7 @@ python = "^3.11"
 grpcio = ">=1.80,<1.81"
 protobuf = ">=5.0"
 faster-whisper = "^1.0"
+psycopg = {version = "^3.2", extras = ["binary"]}
 
 [tool.poetry.group.dev.dependencies]
 grpcio-tools = ">=1.80,<1.81"

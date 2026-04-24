@@ -7,32 +7,55 @@
 #     whisper-net:
 #       external: true
 #
-# Then set WHISPER_GRPC_HOST=whisper, WHISPER_GRPC_PORT=50053.
-# The port is NOT published to the host — only containers in whisper-net can reach it.
+# Then set WHISPER_GRPC_HOST=whisper-ingress, WHISPER_GRPC_PORT=50053.
 
 networks:
   whisper-net:
     name: whisper-net
 
 services:
-  whisper:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: transcriber
+      POSTGRES_USER: transcriber
+      POSTGRES_PASSWORD: transcriber
+    volumes:
+      - whisper-postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+    networks:
+      - whisper-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U transcriber -d transcriber"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  whisper-ingress:
     build:
       context: .
       dockerfile: whisper/Dockerfile
     environment:
-      - GRPC_PORT=50053
-      - WHISPER_MODEL=small
-      # CPU threads used by CTranslate2 for model inference.
-      # Set to the number of physical cores you want to allocate (default 2).
-      - WHISPER_CPU_THREADS=2
-      # gRPC I/O thread pool for handling concurrent file uploads (default 4).
-      - GRPC_WORKERS=4
+      GRPC_PORT: 50053
+      GRPC_WORKERS: 4
+      GRPC_MAX_MESSAGE_BYTES: 52428800
+      SERVICE_ROLE: ingress
+      DATABASE_URL: postgresql://transcriber:transcriber@postgres:5432/transcriber
+      JOB_STORAGE_DIR: /data/jobs
+      JOB_MAX_ATTEMPTS: 3
+      JOB_LEASE_SECONDS: 900
+      JOB_TTL_S: 7200
+      WHISPER_MODEL: small
+      WHISPER_CPU_THREADS: 2
     volumes:
       - whisper-model-cache:/root/.cache/huggingface
+      - whisper-job-data:/data/jobs
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
     networks:
       - whisper-net
-    # No "ports:" — not accessible from host or public IP, only via whisper-net.
     healthcheck:
       test:
         - CMD
@@ -45,7 +68,34 @@ services:
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 90s
+      start_period: 30s
+
+  whisper-worker:
+    build:
+      context: .
+      dockerfile: whisper/Dockerfile
+    environment:
+      SERVICE_ROLE: worker
+      DATABASE_URL: postgresql://transcriber:transcriber@postgres:5432/transcriber
+      JOB_STORAGE_DIR: /data/jobs
+      JOB_MAX_ATTEMPTS: 3
+      JOB_LEASE_SECONDS: 900
+      JOB_TTL_S: 7200
+      CLEANUP_INTERVAL_S: 600
+      WORKER_POLL_INTERVAL_S: 2
+      WHISPER_MODEL: small
+      WHISPER_CPU_THREADS: 2
+    volumes:
+      - whisper-model-cache:/root/.cache/huggingface
+      - whisper-job-data:/data/jobs
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - whisper-net
 
 volumes:
   whisper-model-cache:
+  whisper-job-data:
+  whisper-postgres-data:

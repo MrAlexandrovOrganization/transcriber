@@ -38,7 +38,7 @@ deploy:
 
 .PHONY: restart
 restart:
-	$(DOCKER_COMPOSE) restart whisper
+	$(DOCKER_COMPOSE) restart whisper-ingress whisper-worker
 
 .PHONY: format
 format:
