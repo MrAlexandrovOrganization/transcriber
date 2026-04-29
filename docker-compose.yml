@@ -45,8 +45,8 @@ services:
       JOB_MAX_ATTEMPTS: 3
       JOB_LEASE_SECONDS: 900
       JOB_TTL_S: 7200
-      WHISPER_MODEL: small
-      WHISPER_CPU_THREADS: 2
+      WHISPER_MODEL: large
+      WHISPER_CPU_THREADS: 5
     volumes:
       - whisper-model-cache:/root/.cache/huggingface
       - whisper-job-data:/data/jobs
