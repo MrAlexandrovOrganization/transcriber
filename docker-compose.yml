@@ -31,6 +31,12 @@ services:
       timeout: 5s
       retries: 10
 
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+          cpus: "0.5"
+
   whisper-ingress:
     build:
       context: .
@@ -67,6 +73,12 @@ services:
       retries: 5
       start_period: 30s
 
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+          cpus: "1.0"
+
   whisper-worker:
     build:
       context: .
@@ -91,6 +103,14 @@ services:
         condition: service_healthy
     networks:
       - whisper-net
+
+    deploy:
+      resources:
+        limits:
+          memory: 2.5g
+          cpus: "6.0"
+        reservations:
+          memory: 1.5g
 
 volumes:
   whisper-model-cache:
