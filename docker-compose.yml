@@ -35,7 +35,7 @@ services:
       resources:
         limits:
           memory: 256m
-          cpus: "0.5"
+          cpus: "0.1"
 
   whisper-ingress:
     build:
@@ -110,7 +110,7 @@ services:
           memory: 4.0g
           cpus: "6.0"
         reservations:
-          memory: 1.5g
+          memory: 2g
 
 volumes:
   whisper-model-cache:
