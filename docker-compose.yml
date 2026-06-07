@@ -34,7 +34,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 256m
+          memory: 64m
           cpus: "0.1"
 
   whisper-ingress:
@@ -76,8 +76,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 2g
-          cpus: "1.0"
+          memory: 256m
+          cpus: "0.1"
 
   whisper-worker:
     build:
