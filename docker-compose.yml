@@ -93,7 +93,7 @@ services:
       CLEANUP_INTERVAL_S: 600
       WORKER_POLL_INTERVAL_S: 2
       WHISPER_MODEL: large
-      WHISPER_CPU_THREADS: 6
+      WHISPER_CPU_THREADS: 8
     volumes:
       - whisper-model-cache:/root/.cache/huggingface
       - whisper-job-data:/data/jobs
@@ -108,7 +108,7 @@ services:
       resources:
         limits:
           memory: 4.0g
-          cpus: "6.0"
+          cpus: "8.0"
         reservations:
           memory: 2g
 
