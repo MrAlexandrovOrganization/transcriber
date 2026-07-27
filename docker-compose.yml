@@ -12,6 +12,8 @@
 networks:
   whisper-net:
     name: whisper-net
+    driver_opts:
+      com.docker.network.driver.mtu: "1376"
 
 services:
   postgres:
