@@ -8,7 +8,6 @@ import json
 import logging
 import os
 import uuid
-from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -43,6 +42,8 @@ class JobRecord:
     finished_at: datetime | None
     text: str
     segments_json: str
+    traceparent: str
+    tracestate: str
 
     @property
     def segments(self) -> list[dict[str, float | str]]:
@@ -103,6 +104,12 @@ class JobStore:
                     """
                 )
                 cur.execute(
+                    "ALTER TABLE transcription_jobs ADD COLUMN IF NOT EXISTS traceparent TEXT NOT NULL DEFAULT ''"
+                )
+                cur.execute(
+                    "ALTER TABLE transcription_jobs ADD COLUMN IF NOT EXISTS tracestate TEXT NOT NULL DEFAULT ''"
+                )
+                cur.execute(
                     "CREATE INDEX IF NOT EXISTS idx_transcription_jobs_claim ON transcription_jobs (status, lease_expires_at, created_at)"
                 )
                 cur.execute(
@@ -117,6 +124,8 @@ class JobStore:
         preset: str,
         language_override: str,
         initial_prompt_override: str,
+        traceparent: str = "",
+        tracestate: str = "",
     ) -> tuple[JobRecord, Path]:
         job_id = str(uuid.uuid4())
         job_dir = self._storage_root / job_id
@@ -134,8 +143,10 @@ class JobStore:
                         language_override,
                         initial_prompt_override,
                         input_path,
-                        max_attempts
-                    ) VALUES (%s, 'accepted', %s, %s, %s, %s, %s, %s)
+                        max_attempts,
+                        traceparent,
+                        tracestate
+                    ) VALUES (%s, 'accepted', %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING *
                     """,
                     (
@@ -146,6 +157,8 @@ class JobStore:
                         initial_prompt_override,
                         str(input_path),
                         self._max_attempts,
+                        traceparent,
+                        tracestate,
                     ),
                 )
                 row = cur.fetchone()
@@ -399,4 +412,6 @@ class JobStore:
             finished_at=row["finished_at"],
             text=row["text"],
             segments_json=json.dumps(row["segments_json"]),
+            traceparent=row["traceparent"],
+            tracestate=row["tracestate"],
         )

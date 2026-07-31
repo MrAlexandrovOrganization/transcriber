@@ -11,6 +11,10 @@ grpcio = ">=1.80,<1.81"
 protobuf = ">=5.0"
 faster-whisper = "^1.0"
 psycopg = {version = "^3.2", extras = ["binary"]}
+opentelemetry-api = "^1.39"
+opentelemetry-sdk = "^1.39"
+opentelemetry-exporter-otlp-proto-grpc = "^1.39"
+opentelemetry-instrumentation-grpc = "^0.60b0"
 
 [tool.poetry.group.dev.dependencies]
 grpcio-tools = ">=1.80,<1.81"

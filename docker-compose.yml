@@ -14,6 +14,8 @@ networks:
     name: whisper-net
     driver_opts:
       com.docker.network.driver.mtu: "1376"
+  monitoring-net:
+    external: true
 
 services:
   postgres:
@@ -53,6 +55,7 @@ services:
       JOB_MAX_ATTEMPTS: 3
       JOB_LEASE_SECONDS: 900
       JOB_TTL_S: 7200
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
     volumes:
       - whisper-job-data:/data/jobs
     restart: unless-stopped
@@ -61,6 +64,7 @@ services:
         condition: service_healthy
     networks:
       - whisper-net
+      - monitoring-net
     healthcheck:
       test:
         - CMD
@@ -96,6 +100,7 @@ services:
       WORKER_POLL_INTERVAL_S: 2
       WHISPER_MODEL: large
       WHISPER_CPU_THREADS: 8
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
     volumes:
       - whisper-model-cache:/root/.cache/huggingface
       - whisper-job-data:/data/jobs
@@ -105,6 +110,7 @@ services:
         condition: service_healthy
     networks:
       - whisper-net
+      - monitoring-net
 
     deploy:
       resources:

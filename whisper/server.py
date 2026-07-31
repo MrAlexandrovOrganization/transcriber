@@ -13,9 +13,12 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import grpc
+from opentelemetry import trace
+from opentelemetry.trace import SpanKind, Status, StatusCode
 
 from proto import whisper_pb2, whisper_pb2_grpc
 from whisper.storage import ClaimedJob, JobRecord, JobStore
+from whisper.telemetry import context_from_carrier, current_trace_carrier
 
 logger = logging.getLogger(__name__)
 
@@ -138,11 +141,14 @@ class TranscriptionServicer(whisper_pb2_grpc.TranscriptionServiceServicer):
         language_override = opts.language if opts else ""
         initial_prompt_override = opts.initial_prompt if opts else ""
 
+        trace_carrier = current_trace_carrier()
         job, input_path = self._store.create_job(
             fmt=fmt,
             preset=preset,
             language_override=language_override,
             initial_prompt_override=initial_prompt_override,
+            traceparent=trace_carrier.get("traceparent", ""),
+            tracestate=trace_carrier.get("tracestate", ""),
         )
         self._store.mark_downloading(job.job_id)
 
@@ -246,6 +252,21 @@ class Worker:
 
     def _process_claimed_job(self, claimed: ClaimedJob) -> None:
         job = claimed.job
+        parent_context = context_from_carrier(job.traceparent, job.tracestate)
+        tracer = trace.get_tracer("transcriber.worker")
+        with tracer.start_as_current_span(
+            "transcription.process",
+            context=parent_context,
+            kind=SpanKind.CONSUMER,
+            attributes={
+                "transcription.job.id": job.job_id,
+                "transcription.preset": job.preset,
+                "transcription.attempt": job.attempts,
+            },
+        ) as span:
+            self._process_claimed_job_traced(job, span)
+
+    def _process_claimed_job_traced(self, job: JobRecord, span: trace.Span) -> None:
         logger.info(
             "Processing job: id=%s preset=%s attempt=%d/%d",
             job.job_id,
@@ -269,6 +290,8 @@ class Worker:
                 len(result.text),
                 len(result.segments),
             )
+            span.set_attribute("transcription.result.chars", len(result.text))
+            span.set_attribute("transcription.result.segments", len(result.segments))
         except _CancelledError:
             logger.info("Job cancelled mid-transcription: %s", job.job_id)
             self._store.fail_job(
@@ -278,6 +301,8 @@ class Worker:
                 retryable=False,
             )
         except Exception as exc:
+            span.record_exception(exc)
+            span.set_status(Status(StatusCode.ERROR, str(exc)))
             logger.exception("Job failed: id=%s", job.job_id)
             self._store.fail_job(
                 job_id=job.job_id,
