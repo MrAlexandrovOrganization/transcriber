@@ -28,7 +28,9 @@ services:
       - whisper-postgres-data:/var/lib/postgresql/data
     restart: unless-stopped
     networks:
-      - whisper-net
+      whisper-net:
+        aliases:
+          - whisper-postgres
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U transcriber -d transcriber"]
       interval: 10s
@@ -50,7 +52,7 @@ services:
       GRPC_WORKERS: 4
       GRPC_MAX_MESSAGE_BYTES: 52428800
       SERVICE_ROLE: ingress
-      DATABASE_URL: postgresql://transcriber:transcriber@postgres:5432/transcriber
+      DATABASE_URL: postgresql://transcriber:transcriber@whisper-postgres:5432/transcriber
       JOB_STORAGE_DIR: /data/jobs
       JOB_MAX_ATTEMPTS: 3
       JOB_LEASE_SECONDS: 900
@@ -91,7 +93,7 @@ services:
       dockerfile: whisper/Dockerfile
     environment:
       SERVICE_ROLE: worker
-      DATABASE_URL: postgresql://transcriber:transcriber@postgres:5432/transcriber
+      DATABASE_URL: postgresql://transcriber:transcriber@whisper-postgres:5432/transcriber
       JOB_STORAGE_DIR: /data/jobs
       JOB_MAX_ATTEMPTS: 3
       JOB_LEASE_SECONDS: 900
