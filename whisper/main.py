@@ -3,12 +3,11 @@
 import logging
 import os
 
+from whisper.jsonlog import setup_logging
 from whisper.server import run_ingress, run_worker
 from whisper.telemetry import init_telemetry
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
-)
+setup_logging(os.getenv("SERVICE_ROLE", "ingress").strip().lower())
 logger = logging.getLogger(__name__)
 
 

@@ -27,6 +27,7 @@ Ingress endpoint inside Docker network: `whisper-ingress:50053`.
 - `JOB_MAX_ATTEMPTS`
 - `JOB_LEASE_SECONDS`
 - `JOB_TTL_S`
+- `LOG_LEVEL` — `DEBUG|INFO|WARNING|ERROR` (default `INFO`); logs are emitted as one JSON object per line to stdout (compatible with Go `slog` JSONHandler: fields `time`, `level`, `msg`, plus `service=whisper` and `role`)
 - `SERVICE_ROLE=ingress|worker`
 - `WORKER_POLL_INTERVAL_S`
 - `WHISPER_MODEL`
