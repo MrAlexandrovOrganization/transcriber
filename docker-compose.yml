@@ -14,7 +14,7 @@ networks:
     name: whisper-net
     driver_opts:
       com.docker.network.driver.mtu: "1376"
-  monitoring-net:
+  jaeger-net:
     external: true
 
 services:
@@ -66,7 +66,7 @@ services:
         condition: service_healthy
     networks:
       - whisper-net
-      - monitoring-net
+      - jaeger-net
     healthcheck:
       test:
         - CMD
@@ -112,7 +112,7 @@ services:
         condition: service_healthy
     networks:
       - whisper-net
-      - monitoring-net
+      - jaeger-net
 
     deploy:
       resources:
