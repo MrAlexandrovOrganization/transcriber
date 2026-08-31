@@ -38,7 +38,7 @@ _VOICE_PARAMS: dict = {
     "vad_parameters": {"min_silence_duration_ms": 500, "speech_pad_ms": 200},
     "condition_on_previous_text": True,
     "initial_prompt": "Разговорная речь на русском языке. Текст с правильными знаками препинания.",
-    "repetition_penalty": 1.05,
+    "repetition_penalty": 1.2,
     "no_speech_threshold": 0.5,
 }
 
@@ -53,7 +53,7 @@ _LECTURE_PARAMS: dict = {
         "Академическая лекция на русском языке. "
         "Текст с правильными знаками препинания и заглавными буквами."
     ),
-    "repetition_penalty": 1.1,
+    "repetition_penalty": 1.2,
     "hallucination_silence_threshold": 3.0,
     "no_speech_threshold": 0.5,
 }
@@ -66,7 +66,7 @@ _MEETING_PARAMS: dict = {
     "vad_parameters": {"min_silence_duration_ms": 300, "speech_pad_ms": 150},
     "condition_on_previous_text": True,
     "initial_prompt": "Деловая встреча или разговор на русском языке. Текст с правильными знаками препинания.",
-    "repetition_penalty": 1.05,
+    "repetition_penalty": 1.2,
     "no_speech_threshold": 0.4,
 }
 
