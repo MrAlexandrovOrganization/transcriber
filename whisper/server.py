@@ -357,7 +357,7 @@ class CleanupWorker:
             time.sleep(_CLEANUP_INTERVAL_S)
             deleted = self._store.cleanup_expired_jobs(_JOB_TTL_S)
             if deleted:
-                logger.info("Cleaned up %d expired jobs", deleted)
+                logger.debug("Cleaned up %d expired jobs", deleted)
 
 
 def run_ingress() -> None:
