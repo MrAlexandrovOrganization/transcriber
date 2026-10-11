@@ -26,8 +26,12 @@
 Получайте утверждённый commit через `git fetch` и fast-forward/отдельный checkout;
 не переносите исходники вручную и не обновляйте checkout работающего процесса.
 
-Системные prerequisites: WSL2 с systemd, Python версии из `versions.mk`, модуль
-`venv`, Git, OpenSSH, CUDA 12/cuBLAS и рабочий `/dev/dxg`. Проверенная машина:
+Системные prerequisites: WSL2 с systemd, рабочий user D-Bus (на Ubuntu пакет
+`dbus-user-session`, стандартные `dbus.socket`/`dbus.service`), Python версии из
+`versions.mk`, модуль `venv`, Git, OpenSSH, CUDA 12/cuBLAS и рабочий `/dev/dxg`.
+Проверьте `systemctl --user is-system-running` и наличие `/run/user/$(id -u)/bus`
+до установки. Один лишь активный `user@<uid>.service` не подтверждает доступность
+его API для `systemctl --user`. Проверенная машина:
 Ubuntu 22.04, i7-12650H, 16 logical CPUs, 15 GiB RAM, MX550 2 GiB, capability 7.5,
 драйвер 572.42, CUDA toolkit 12.8. `nvidia-smi` доступен по
 `/usr/lib/wsl/lib/nvidia-smi`. Основные Python зависимости фиксирует `poetry.lock`,
@@ -126,7 +130,10 @@ lease; это требует наблюдения на длинных запис
 Units используют `ProtectSystem=strict`, `ProtectHome=read-only`, `PrivateTmp`,
 `NoNewPrivileges`; запись разрешена только в собственный log каталог и временные
 файлы. На проверенной WSL sandbox успешно запущен настоящим user systemd
-oneshot, а не только проверен синтаксически. Проверяйте повторно после смены WSL/
+oneshot, а не только проверен синтаксически. Linux launcher regression дополнительно
+проверяет generated units через `systemd-analyze verify --man=no` **без `--user`**
+и без запуска процессов; эта проверка не требует user D-Bus.
+Проверяйте повторно после смены WSL/
 ядра/systemd. Worker shutdown получает 10 секунд, systemd — 30 секунд на всю группу.
 
 Логи в `~/.local/state/transcriber/{gpu,cpu,tunnel}/` ротируются: 5 MiB × четыре
