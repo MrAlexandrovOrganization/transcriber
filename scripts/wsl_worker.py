@@ -20,6 +20,15 @@ def quote(value: str | Path) -> str:
     return '"' + text.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%") + '"'
 
 
+def directory_value(path: Path) -> str:
+    # WorkingDirectory is a single literal path, not a command/word list.
+    # systemd keeps double quotes here as part of the path and rejects it.
+    value = str(path)
+    if not path.is_absolute() or any(char in value for char in "\r\n\0"):
+        raise ValueError("Working directory must be an absolute single-line path")
+    return value.replace("%", "%%")
+
+
 def worker_environment(
     role: str, home: Path, token: Path, cudnn: Path
 ) -> dict[str, str]:
@@ -144,7 +153,7 @@ def units(
             "StartLimitIntervalSec=0",
             "[Service]",
             "Type=simple",
-            "WorkingDirectory=" + quote(project),
+            "WorkingDirectory=" + directory_value(project),
             "ExecStart=" + " ".join(quote(arg) for arg in command),
             *[
                 "Environment=" + quote(key + "=" + value)

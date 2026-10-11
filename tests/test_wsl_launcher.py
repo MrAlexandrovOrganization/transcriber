@@ -1,7 +1,9 @@
 """WSL launcher tests use synthetic files and never start production services."""
 
 import os
+import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -45,6 +47,10 @@ class WSLLauncherTests(unittest.TestCase):
                 self.assertIn("NoNewPrivileges=yes", content)
                 self.assertIn("Restart=always", content)
                 self.assertIn("ProtectHome=read-only", content)
+                self.assertIn(
+                    "WorkingDirectory=" + str(home / "checkout") + "\n", content
+                )
+                self.assertNotIn('WorkingDirectory="', content)
                 self.assertIn("REMOTE_WORKER_ENDPOINT=127.0.0.1:50055", content)
                 self.assertEqual(
                     os.stat(directory / f"transcriber-wsl-{role}.service").st_mode
@@ -53,6 +59,36 @@ class WSLLauncherTests(unittest.TestCase):
                 )
             self.assertIn("CPUQuota=150%", definitions["transcriber-wsl-gpu.service"])
             self.assertIn("CPUQuota=400%", definitions["transcriber-wsl-cpu.service"])
+
+    @unittest.skipUnless(
+        sys.platform == "linux" and shutil.which("systemd-analyze"),
+        "requires Linux systemd-analyze",
+    )
+    def test_generated_units_pass_real_systemd_parser(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            project = home / "checkout"
+            (project / ".venv/bin").mkdir(parents=True)
+            (project / ".venv/bin/python").symlink_to(sys.executable)
+            directory = home / "units"
+            wsl_worker.install(directory, self.definitions(home), home)
+            # No user-session D-Bus is required for static parser validation.
+            # verify never starts the units or executes their ExecStart commands.
+            with tempfile.TemporaryFile() as output:
+                result = subprocess.run(
+                    [
+                        "systemd-analyze",
+                        "verify",
+                        "--man=no",
+                        *map(str, sorted(directory.glob("*"))),
+                    ],
+                    stdout=output,
+                    stderr=subprocess.STDOUT,
+                    timeout=30,
+                )
+                output.seek(0)
+                diagnostic = output.read(4096).decode("utf-8", errors="replace")
+            self.assertEqual(result.returncode, 0, diagnostic)
 
     def test_model_device_threads_and_dedicated_tunnel(self):
         home = Path("/synthetic")
@@ -181,6 +217,13 @@ class WSLLauncherTests(unittest.TestCase):
         for value in ("a\nb", "a\rb", "a\0b"):
             with self.assertRaises(ValueError):
                 wsl_worker.quote(value)
+        self.assertEqual(
+            wsl_worker.directory_value(Path("/synthetic a/%name")),
+            "/synthetic a/%%name",
+        )
+        for value in ("relative", "/a\nb", "/a\rb", "/a\0b"):
+            with self.assertRaises(ValueError):
+                wsl_worker.directory_value(Path(value))
 
 
 if __name__ == "__main__":
