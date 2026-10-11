@@ -59,7 +59,9 @@ services:
       DATABASE_URL: postgresql://transcriber:transcriber@whisper-postgres:5432/transcriber
       JOB_STORAGE_DIR: /data/jobs
       JOB_MAX_ATTEMPTS: 3
-      JOB_LEASE_SECONDS: 900
+      JOB_LEASE_SECONDS: 120
+      PREFERRED_WORKER_IDS: ${PREFERRED_WORKER_IDS:-mac-m3-pro,wsl-gpu,wsl-cpu}
+      WORKER_AVAILABILITY_TTL_S: ${WORKER_AVAILABILITY_TTL_S:-90}
       JOB_TTL_S: 7200
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
     volumes:
@@ -101,7 +103,11 @@ services:
       DATABASE_URL: postgresql://transcriber:transcriber@whisper-postgres:5432/transcriber
       JOB_STORAGE_DIR: /data/jobs
       JOB_MAX_ATTEMPTS: 3
-      JOB_LEASE_SECONDS: 900
+      JOB_LEASE_SECONDS: 120
+      PREFERRED_WORKER_IDS: ${PREFERRED_WORKER_IDS:-mac-m3-pro,wsl-gpu,wsl-cpu}
+      WORKER_AVAILABILITY_TTL_S: ${WORKER_AVAILABILITY_TTL_S:-90}
+      WORKER_ID: server-fallback
+      WORKER_FALLBACK: ${WORKER_FALLBACK:-1}
       JOB_TTL_S: 7200
       CLEANUP_INTERVAL_S: 600
       WORKER_POLL_INTERVAL_S: 2

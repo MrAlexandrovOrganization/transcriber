@@ -27,6 +27,7 @@ class FakeStub:
         self.accepted = True
         self.audio = b"synthetic"
         self.calls = []
+        self.availability = []
         self.heartbeat_seen = threading.Event()
 
     def _record(self, kwargs):
@@ -38,6 +39,11 @@ class FakeStub:
     def Download(self, request, **kwargs):
         self._record(kwargs)
         return iter([pb.WorkerAudioChunk(data=self.audio)])
+
+    def ReportAvailability(self, request, **kwargs):
+        self._record(kwargs)
+        self.availability.append(request)
+        return pb.WorkerAvailabilityResponse(accepted=True, ttl_seconds=90)
 
     def Heartbeat(self, request, **kwargs):
         self._record(kwargs)
@@ -97,6 +103,60 @@ def claim(**kwargs):
 
 
 class RemoteWorkerTests(unittest.TestCase):
+    def test_availability_is_reported_while_busy_and_withdrawn_on_stop(self):
+        stub = FakeStub()
+        engine = FakeEngine(stub, wait=0.15)
+        worker = RemoteWorker(
+            config(), stub, engine, "synthetic-worker-token-at-least-32-characters"
+        )
+        claimed = []
+
+        def do_claim(request, **kwargs):
+            stub._record(kwargs)
+            self.assertTrue(stub.availability[0].ready)
+            self.assertEqual(request.instance_id, worker.instance_id)
+            claimed.append(request)
+            return claim()
+
+        original_complete = stub.Complete
+
+        def complete(request, **kwargs):
+            response = original_complete(request, **kwargs)
+            worker.stop.set()
+            return response
+
+        original_report = worker._report_availability
+
+        def report(ready):
+            original_report(ready)
+            return 0.02
+
+        stub.Claim = do_claim
+        stub.Complete = complete
+        with patch.object(worker, "_report_availability", report):
+            worker.run_forever()
+        self.assertEqual(len(claimed), 1)
+        self.assertGreaterEqual(len(stub.availability), 4)
+        self.assertTrue(all(r.ready for r in stub.availability[:-1]))
+        self.assertFalse(stub.availability[-1].ready)
+        self.assertTrue(
+            all(r.instance_id == worker.instance_id for r in stub.availability)
+        )
+
+    def test_rejected_readiness_does_not_claim_work(self):
+        stub = FakeStub()
+        worker = RemoteWorker(
+            config(), stub, None, "synthetic-worker-token-at-least-32-characters"
+        )
+        stub.ReportAvailability = lambda *a, **kw: pb.WorkerAvailabilityResponse(
+            accepted=False, ttl_seconds=90
+        )
+        claims = []
+        stub.Claim = lambda *a, **kw: claims.append(a)
+        with patch.object(worker.stop, "wait", lambda _: worker.stop.set()):
+            worker.run_forever()
+        self.assertEqual(claims, [])
+
     def test_heartbeat_runs_while_inference_is_blocked_and_temp_is_removed(self):
         stub = FakeStub()
         engine = FakeEngine(stub, wait=0.6)
@@ -211,7 +271,9 @@ class RemoteWorkerTests(unittest.TestCase):
     def test_offline_coordinator_backoff(self):
         stop = threading.Event()
         stub = FakeStub()
-        stub.Claim = lambda *args, **kwargs: (_ for _ in ()).throw(Offline())
+        stub.ReportAvailability = lambda *args, **kwargs: (_ for _ in ()).throw(
+            Offline()
+        )
         delays = []
 
         def wait(delay):

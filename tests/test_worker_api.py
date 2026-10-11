@@ -51,6 +51,8 @@ class WorkerAPITests(unittest.TestCase):
                 "JOB_STORAGE_DIR": self.tmp.name,
                 "JOB_LEASE_SECONDS": "3",
                 "JOB_MAX_ATTEMPTS": "2",
+                "PREFERRED_WORKER_IDS": "mac-primary,wsl-gpu,wsl-cpu",
+                "WORKER_AVAILABILITY_TTL_S": "90",
             },
         )
         self.env.start()
@@ -109,6 +111,225 @@ class WorkerAPITests(unittest.TestCase):
                 "UPDATE transcription_jobs SET lease_expires_at = NOW() - INTERVAL '1 second' WHERE job_id = %s",
                 (job_id,),
             )
+
+    def report_availability(self, worker_id, instance_id, ready=True):
+        return self.rpc(
+            self.stub.ReportAvailability,
+            pb.WorkerAvailabilityRequest(
+                worker_id=worker_id, instance_id=instance_id, ready=ready
+            ),
+        )
+
+    def claim_primary(self, worker_id, instance_id):
+        return self.rpc(
+            self.stub.Claim,
+            pb.WorkerClaimRequest(worker_id=worker_id, instance_id=instance_id),
+        )
+
+    def expire_availability(self, worker_id, instance_id):
+        with self.store.connect() as conn:
+            conn.execute(
+                "UPDATE worker_availability SET ready_until = NOW() - INTERVAL '1 second' "
+                "WHERE worker_id = %s AND instance_id = %s",
+                (worker_id, instance_id),
+            )
+
+    def test_primary_offline_allows_fallback_without_consuming_attempts(self):
+        job_id = self.submit()
+        instance_id = str(uuid.uuid4())
+        self.assertFalse(self.claim_primary("mac-primary", instance_id).job_id)
+        self.assertEqual(self.store.get_job(job_id).attempts, 0)
+        claimed = self.store.claim_next_job("server-fallback", fallback=True)
+        self.assertEqual(claimed.job.job_id, job_id)
+        self.assertEqual(claimed.job.attempts, 1)
+
+    def test_live_primary_blocks_fallback_while_idle_and_busy(self):
+        first = self.submit()
+        second = self.submit()
+        instance_id = str(uuid.uuid4())
+        report = self.report_availability("mac-primary", instance_id)
+        self.assertTrue(report.accepted)
+        self.assertEqual(report.ttl_seconds, self.store.availability_ttl_seconds)
+        self.assertEqual(report.ttl_seconds, 90)
+        self.assertIsNone(self.store.claim_next_job("server-fallback", fallback=True))
+        self.assertFalse(self.claim_primary("mac-primary", "").job_id)
+        self.assertFalse(self.claim_primary("mac-primary", str(uuid.uuid4())).job_id)
+        claimed = self.claim_primary("mac-primary", instance_id)
+        self.assertEqual(claimed.job_id, first)
+        # A primary that is already processing still reserves queued work.
+        self.assertIsNone(self.store.claim_next_job("server-fallback", fallback=True))
+        self.assertEqual(self.store.get_job(second).status, "queued")
+        self.assertEqual(self.store.get_job(second).attempts, 0)
+
+    def test_primary_down_releases_fallback_without_waiting_for_ttl(self):
+        job_id = self.submit()
+        instance_id = str(uuid.uuid4())
+        self.report_availability("mac-primary", instance_id)
+        self.assertIsNone(self.store.claim_next_job("server-fallback", fallback=True))
+        self.assertTrue(
+            self.report_availability("mac-primary", instance_id, ready=False).accepted
+        )
+        self.assertFalse(self.claim_primary("mac-primary", instance_id).job_id)
+        self.assertEqual(
+            self.store.claim_next_job("server-fallback", fallback=True).job.job_id,
+            job_id,
+        )
+
+    def test_expired_primary_releases_fallback_and_requires_new_report(self):
+        job_id = self.submit()
+        instance_id = str(uuid.uuid4())
+        self.report_availability("mac-primary", instance_id)
+        self.expire_availability("mac-primary", instance_id)
+        self.assertFalse(self.claim_primary("mac-primary", instance_id).job_id)
+        self.assertEqual(self.store.get_job(job_id).attempts, 0)
+        self.assertEqual(
+            self.store.claim_next_job("server-fallback", fallback=True).job.job_id,
+            job_id,
+        )
+
+    def test_any_primary_instance_blocks_fallback_and_down_is_instance_scoped(self):
+        job_id = self.submit()
+        old_mac = str(uuid.uuid4())
+        new_mac = str(uuid.uuid4())
+        gpu = str(uuid.uuid4())
+        cpu = str(uuid.uuid4())
+        for worker_id, instance in (
+            ("mac-primary", old_mac),
+            ("mac-primary", new_mac),
+            ("wsl-gpu", gpu),
+            ("wsl-cpu", cpu),
+        ):
+            self.report_availability(worker_id, instance)
+        self.report_availability("mac-primary", old_mac, ready=False)
+        self.expire_availability("wsl-gpu", gpu)
+        self.report_availability("wsl-cpu", cpu, ready=False)
+        self.assertFalse(self.claim_primary("mac-primary", old_mac).job_id)
+        self.assertIsNone(self.store.claim_next_job("server-fallback", fallback=True))
+        self.assertEqual(self.claim_primary("mac-primary", new_mac).job_id, job_id)
+
+    def test_unlisted_availability_does_not_suppress_fallback(self):
+        job_id = self.submit()
+        self.assertTrue(
+            self.report_availability("unlisted-worker", str(uuid.uuid4())).accepted
+        )
+        self.assertEqual(
+            self.store.claim_next_job("server-fallback", fallback=True).job.job_id,
+            job_id,
+        )
+
+    def test_availability_renewal_survives_store_restart(self):
+        job_id = self.submit()
+        instance_id = str(uuid.uuid4())
+        self.report_availability("mac-primary", instance_id)
+        self.expire_availability("mac-primary", instance_id)
+        self.assertTrue(self.report_availability("mac-primary", instance_id).accepted)
+        restarted_store = JobStore()
+        restarted_store.init_schema()
+        self.assertIsNone(
+            restarted_store.claim_next_job("server-fallback", fallback=True)
+        )
+        self.assertEqual(self.claim_primary("mac-primary", instance_id).job_id, job_id)
+
+    def test_availability_rpc_rejects_unauthenticated_and_invalid_identity(self):
+        valid = pb.WorkerAvailabilityRequest(
+            worker_id="mac-primary", instance_id=str(uuid.uuid4()), ready=True
+        )
+        with self.assertRaises(grpc.RpcError) as error:
+            self.stub.ReportAvailability(valid, timeout=5)
+        self.assertEqual(error.exception.code(), grpc.StatusCode.UNAUTHENTICATED)
+        for worker_id, instance_id in (
+            ("", valid.instance_id),
+            ("bad worker", valid.instance_id),
+            ("a" * 129, valid.instance_id),
+            ("mac-primary", ""),
+            ("mac-primary", "not-a-uuid"),
+        ):
+            with self.subTest(worker_id=worker_id, instance_id=instance_id):
+                with self.assertRaises(grpc.RpcError) as error:
+                    self.report_availability(worker_id, instance_id)
+                self.assertEqual(
+                    error.exception.code(), grpc.StatusCode.INVALID_ARGUMENT
+                )
+        with self.assertRaises(grpc.RpcError) as error:
+            self.claim_primary("mac-primary", "not-a-uuid")
+        self.assertEqual(error.exception.code(), grpc.StatusCode.INVALID_ARGUMENT)
+        with self.store.connect() as conn:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) AS n FROM worker_availability"
+                ).fetchone()["n"],
+                0,
+            )
+
+    def test_concurrent_primary_claims_win_over_fallback_and_keep_fencing(self):
+        jobs = {self.submit(), self.submit(), self.submit()}
+        mac = str(uuid.uuid4())
+        gpu = str(uuid.uuid4())
+        self.report_availability("mac-primary", mac)
+        self.report_availability("wsl-gpu", gpu)
+        barrier = threading.Barrier(3)
+
+        def claim(which):
+            barrier.wait(timeout=5)
+            if which == "fallback":
+                return self.store.claim_next_job("server-fallback", fallback=True)
+            worker_id, instance = which
+            return self.claim_primary(worker_id, instance)
+
+        with futures.ThreadPoolExecutor(max_workers=3) as executor:
+            results = list(
+                executor.map(
+                    claim, [("mac-primary", mac), ("wsl-gpu", gpu), "fallback"]
+                )
+            )
+        self.assertIsNone(results[2])
+        claims = results[:2]
+        self.assertEqual(len({c.job_id for c in claims}), 2)
+        self.assertTrue(all(c.job_id in jobs for c in claims))
+        self.assertNotEqual(claims[0].lease_token, claims[1].lease_token)
+        remaining = jobs - {c.job_id for c in claims}
+        self.assertEqual(self.store.get_job(remaining.pop()).attempts, 0)
+        self.assertFalse(
+            self.rpc(
+                self.stub.Complete,
+                pb.WorkerCompleteRequest(
+                    job_id=claims[0].job_id,
+                    lease_token=claims[1].lease_token,
+                    text="wrong owner",
+                ),
+            ).accepted
+        )
+
+    def test_fallback_reclaim_after_sleep_fences_stale_primary_result(self):
+        job_id = self.submit()
+        instance_id = str(uuid.uuid4())
+        self.report_availability("mac-primary", instance_id)
+        original = self.claim_primary("mac-primary", instance_id)
+        self.expire_availability("mac-primary", instance_id)
+        self.expire(job_id)
+        replacement = self.store.claim_next_job("server-fallback", fallback=True)
+        self.assertEqual(replacement.job.job_id, job_id)
+        self.assertNotEqual(original.lease_token, replacement.lease_owner)
+        self.assertFalse(
+            self.rpc(
+                self.stub.Complete,
+                pb.WorkerCompleteRequest(
+                    job_id=job_id,
+                    lease_token=original.lease_token,
+                    text="stale primary",
+                ),
+            ).accepted
+        )
+        self.assertTrue(
+            self.store.complete_job(
+                job_id=job_id,
+                worker_id=replacement.lease_owner,
+                text="fallback result",
+                segments=[],
+                result_path="",
+            )
+        )
+        self.assertEqual(self.store.get_job(job_id).text, "fallback result")
 
     def test_no_workers_then_download_complete_and_duplicate_rejection(self):
         job_id = self.submit()
@@ -553,6 +774,8 @@ class WorkerAPITests(unittest.TestCase):
             conn.execute(
                 "ALTER TABLE transcription_jobs DROP COLUMN request_id, DROP COLUMN retain_until_ack, DROP COLUMN acknowledged_at"
             )
+            # Emulate the old production schema, which predates availability.
+            conn.execute("DROP TABLE worker_availability")
             conn.execute("DROP TABLE transcriber_schema_migrations")
         self.store.init_schema()
         self.store.init_schema()
@@ -566,7 +789,7 @@ class WorkerAPITests(unittest.TestCase):
                 conn.execute(
                     "SELECT COUNT(*) AS n FROM transcriber_schema_migrations"
                 ).fetchone()["n"],
-                2,
+                3,
             )
 
     def test_real_mac_inference_optional(self):

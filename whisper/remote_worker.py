@@ -146,6 +146,8 @@ class RemoteWorker:
         self.stub = stub
         self.engine = engine
         self.stop = stop if stop is not None else threading.Event()
+        self.instance_id = str(uuid.uuid4())
+        self._available = threading.Event()
         self._metadata = (("authorization", "Bearer " + token),)
 
     def _call(self, method, request):
@@ -153,25 +155,84 @@ class RemoteWorker:
 
     def run_forever(self):
         failures = 0
-        while not self.stop.is_set():
-            try:
-                claim = self._call(
-                    self.stub.Claim,
-                    pb.WorkerClaimRequest(worker_id=self.config.worker_id),
-                )
-                failures = 0
-                if claim.job_id:
-                    self.process(claim)
-                else:
+        reporter = None
+        try:
+            while not self.stop.is_set():
+                try:
+                    if reporter is None:
+                        interval = self._report_availability(True)
+                        self._available.set()
+                        reporter = threading.Thread(
+                            target=self._report_availability_loop,
+                            args=(interval,),
+                            name="worker-availability",
+                            daemon=True,
+                        )
+                        reporter.start()
+                        logger.info(
+                            "Worker availability registered: worker=%s",
+                            self.config.worker_id,
+                        )
+                    if not self._available.wait(0.5):
+                        continue
+                    if self.stop.is_set():
+                        break
+                    claim = self._call(
+                        self.stub.Claim,
+                        pb.WorkerClaimRequest(
+                            worker_id=self.config.worker_id,
+                            instance_id=self.instance_id,
+                        ),
+                    )
+                    failures = 0
+                    if claim.job_id:
+                        self.process(claim)
+                    else:
+                        self.stop.wait(self.config.poll_interval)
+                except grpc.RpcError:
+                    failures += 1
+                    delay = min(60.0, 2.0 ** min(failures, 6)) * random.uniform(
+                        0.8, 1.2
+                    )
+                    logger.warning("Worker coordinator unavailable; retry scheduled")
+                    self.stop.wait(delay)
+                except Exception:
+                    logger.error("Worker iteration failed; retry scheduled")
                     self.stop.wait(self.config.poll_interval)
-            except grpc.RpcError:
-                failures += 1
-                delay = min(60.0, 2.0 ** min(failures, 6)) * random.uniform(0.8, 1.2)
-                logger.warning("Worker coordinator unavailable; retry scheduled")
-                self.stop.wait(delay)
+        finally:
+            self.stop.set()
+            if reporter is not None:
+                reporter.join(timeout=4)
+                try:
+                    self._report_availability(False)
+                except Exception:
+                    # A disconnected/crashed worker expires on the server clock.
+                    pass
+
+    def _report_availability(self, ready):
+        response = self.stub.ReportAvailability(
+            pb.WorkerAvailabilityRequest(
+                worker_id=self.config.worker_id,
+                instance_id=self.instance_id,
+                ready=ready,
+            ),
+            timeout=min(3.0, self.config.rpc_timeout),
+            metadata=self._metadata,
+        )
+        if not response.accepted or response.ttl_seconds < 30:
+            raise ValueError("Coordinator rejected worker availability")
+        return min(20.0, response.ttl_seconds / 3.0)
+
+    def _report_availability_loop(self, interval):
+        while not self.stop.wait(interval):
+            try:
+                interval = self._report_availability(True)
+                self._available.set()
             except Exception:
-                logger.error("Worker iteration failed; retry scheduled")
-                self.stop.wait(self.config.poll_interval)
+                self._available.clear()
+                logger.warning(
+                    "Worker availability report unavailable; retry scheduled"
+                )
 
     def process(self, claim):
         if self.stop.is_set():

@@ -7,6 +7,7 @@ import dataclasses
 import json
 import logging
 import os
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -87,6 +88,21 @@ class JobStore:
         self._dsn = os.environ["DATABASE_URL"]
         self._lease_seconds = int(os.getenv("JOB_LEASE_SECONDS", "900"))
         self._max_attempts = int(os.getenv("JOB_MAX_ATTEMPTS", "3"))
+        self._preferred_workers = [
+            value.strip()
+            for value in os.getenv("PREFERRED_WORKER_IDS", "").split(",")
+            if value.strip()
+        ]
+        self._availability_ttl_seconds = int(
+            os.getenv("WORKER_AVAILABILITY_TTL_S", "90")
+        )
+        if any(
+            not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", value)
+            for value in self._preferred_workers
+        ):
+            raise ValueError("Invalid preferred worker ID")
+        if not 30 <= self._availability_ttl_seconds <= 600:
+            raise ValueError("Worker availability TTL must be within 30..600 seconds")
         self._storage_root = Path(os.getenv("JOB_STORAGE_DIR", "/data/jobs"))
         if self._lease_seconds < 3 or self._max_attempts < 1:
             raise ValueError("Lease must be >= 3 seconds and max attempts >= 1")
@@ -95,6 +111,10 @@ class JobStore:
     @property
     def lease_seconds(self) -> int:
         return self._lease_seconds
+
+    @property
+    def availability_ttl_seconds(self) -> int:
+        return self._availability_ttl_seconds
 
     @property
     def storage_root(self) -> Path:
@@ -329,13 +349,42 @@ class JobStore:
             conn.commit()
         return row is not None
 
-    def claim_next_job(self, worker_id: str) -> ClaimedJob | None:
+    def report_availability(
+        self, worker_id: str, instance_id: str, ready: bool
+    ) -> bool:
+        with self.connect() as conn:
+            conn.execute(_sql("cleanup_availability"))
+            conn.execute(
+                _sql("report_availability"),
+                (
+                    worker_id,
+                    instance_id,
+                    self._availability_ttl_seconds if ready else 0,
+                ),
+            )
+        return True
+
+    def claim_next_job(
+        self, worker_id: str, *, fallback: bool = False, instance_id: str = ""
+    ) -> ClaimedJob | None:
         # Fence each attempt independently, even across worker restarts/PID reuse.
         lease_owner = f"{worker_id}/{uuid.uuid4()}"
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(_sql("reap"))
-                cur.execute(_sql("claim"), (lease_owner, self._lease_seconds))
+                cur.execute(
+                    _sql("claim"),
+                    (
+                        fallback,
+                        self._preferred_workers,
+                        worker_id,
+                        self._preferred_workers,
+                        worker_id,
+                        instance_id,
+                        lease_owner,
+                        self._lease_seconds,
+                    ),
+                )
                 row = cur.fetchone()
             conn.commit()
         if row is None:

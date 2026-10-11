@@ -2,6 +2,14 @@ WITH candidate AS (
     SELECT job_id
     FROM transcription_jobs
     WHERE status IN ('queued', 'running')
+      AND (NOT %s OR NOT EXISTS (
+          SELECT 1 FROM worker_availability
+          WHERE worker_id = ANY(%s) AND ready_until > NOW()
+      ))
+      AND (NOT (%s = ANY(%s)) OR EXISTS (
+          SELECT 1 FROM worker_availability
+          WHERE worker_id = %s AND instance_id = %s AND ready_until > NOW()
+      ))
       AND attempts < max_attempts
       AND (status = 'queued' OR lease_expires_at IS NULL OR lease_expires_at < NOW())
     ORDER BY created_at

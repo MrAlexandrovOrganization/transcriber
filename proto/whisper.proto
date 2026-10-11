@@ -23,6 +23,8 @@ service TranscriptionService {
 // Optional, separately authenticated endpoint for workers outside Docker.
 // Each claim has a fresh lease token; expired owners cannot publish results.
 service WorkerService {
+  // Report readiness independently of job leases, including while idle/busy.
+  rpc ReportAvailability(WorkerAvailabilityRequest) returns (WorkerAvailabilityResponse);
   rpc Claim(WorkerClaimRequest) returns (WorkerClaimResponse);
   rpc Download(WorkerJobRequest) returns (stream WorkerAudioChunk);
   rpc Heartbeat(WorkerHeartbeatRequest) returns (WorkerAck);
@@ -32,6 +34,19 @@ service WorkerService {
 
 message WorkerClaimRequest {
   string worker_id = 1;
+  // Matches the reporting process. Required for configured preferred workers.
+  string instance_id = 2;
+}
+
+message WorkerAvailabilityRequest {
+  string worker_id = 1;
+  string instance_id = 2; // Fresh UUID on each process start.
+  bool ready = 3; // Only after the model has loaded; false on graceful stop.
+}
+
+message WorkerAvailabilityResponse {
+  bool accepted = 1;
+  int32 ttl_seconds = 2; // Coordinator clock determines expiry.
 }
 
 message WorkerClaimResponse {

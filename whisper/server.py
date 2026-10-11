@@ -265,13 +265,19 @@ class Worker:
     def __init__(self, store: JobStore):
         self._store = store
         self._worker_id = os.getenv("WORKER_ID", f"worker-{uuid.uuid4()}")
+        fallback = os.getenv("WORKER_FALLBACK", "0")
+        if fallback not in {"0", "1"}:
+            raise ValueError("WORKER_FALLBACK must be 0 or 1")
+        self._fallback = fallback == "1"
         self._engine = FasterWhisperEngine()
 
     def run_forever(self, stop: threading.Event | None = None) -> None:
         stop = stop or threading.Event()
         while not stop.is_set():
             try:
-                claimed = self._store.claim_next_job(self._worker_id)
+                claimed = self._store.claim_next_job(
+                    self._worker_id, fallback=self._fallback
+                )
                 if claimed is not None:
                     self._process_claimed_job(claimed, stop)
                     continue

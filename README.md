@@ -18,6 +18,8 @@ Durable asynchronous Whisper transcription service.
 - A worker stores the final result before marking the job `done`; durable clients
   can separately acknowledge receipt with `Ack`.
 - If a worker dies before lease renewal, the job becomes claimable again and is retried.
+- Native Mac/WSL workers are preferred; the permanent server worker claims only
+  while all preferred workers are unavailable. See [availability and priority](docs/worker-priority.md).
 
 ## Local run
 
@@ -90,8 +92,15 @@ and ledger rather than reversing migrations.
 - `WORKER_POLL_INTERVAL_S`
 - `WHISPER_MODEL`
 - `WHISPER_CPU_THREADS`
+- `PREFERRED_WORKER_IDS`, `WORKER_AVAILABILITY_TTL_S`, `WORKER_FALLBACK`
 
 ## Native Mac/WSL workers (opt in)
+
+For a managed native WSL GPU/CPU installation, see
+[WSL worker prerequisites, setup and systemd lifecycle](docs/wsl-worker.md).
+It uses the locked project `.venv`, CUDA/cuBLAS supplied by WSL, and the optional
+cuDNN package pinned by `CUDNN_VERSION` in `versions.mk`; it does not install
+system drivers or change Windows startup/sleep settings.
 
 The existing PostgreSQL queue remains the source of truth. Remote workers use a
 separate, authenticated gRPC WorkerService to claim jobs, download audio, renew
@@ -151,11 +160,13 @@ WORKER_POLL_INTERVAL_S=60 make run-remote-worker
 ```
 
 Ctrl+C stops the worker; active inference is interrupted cooperatively and its
-lease eventually expires. The server's default lease is 900 seconds. Each
+lease eventually expires. Compose uses a 120-second job lease. Each
 process claims at most one job at a time. WSL CUDA uses the same worker with
 `WHISPER_DEVICE=cuda`; verify CUDA/cuBLAS/cuDNN and supported compute types first.
 Mac uses CPU in this pilot; Apple GPU requires a separate inference engine.
-No availability probe from the bot is needed: idle workers poll for work.
+No availability probe from the bot is needed: workers independently report
+readiness while idle or busy, then poll for work. See
+[Mac setup](docs/mac-worker.md) and [WSL setup](docs/wsl-worker.md).
 
 Worker transport rejects non-loopback plaintext unless explicitly allowed with
 `REMOTE_WORKER_ALLOW_INSECURE=1` for a trusted VPN. `REMOTE_WORKER_TLS=1` and
@@ -167,11 +178,12 @@ uploads on ingress. Existing ingress upload behavior is unchanged unless it is
 set. Serialized results are limited to 4 MiB. Only enable a remote pool for jobs
 compatible with its model and limits: capability-based routing is a later step.
 
-**Production notes-bot cannot safely wait overnight yet.** Its pending delivery
-context is in memory and expires after three hours. The backend queue survives
-offline workers, but frontend restart/result retention need a durable delivery
-ledger and idempotent note writes before disabling the permanent worker.
-See [the runtime audit and rollout plan](docs/distributed-workers.md).
+Production notes-bot now persists accepted voice jobs, results and delivery
+checkpoints in PostgreSQL and uses idempotent note appends. It can wait for absent
+workers across frontend restarts; results are retained until durable receipt.
+Its implementation and guarantees are documented in that independent repository,
+`docs/durable-voice.md`. [The initial runtime audit](docs/distributed-workers.md)
+records the earlier deployment and is historical context.
 
 ## Checks
 

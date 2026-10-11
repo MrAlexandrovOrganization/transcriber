@@ -7,6 +7,7 @@ import logging
 import math
 import os
 import re
+import uuid
 from concurrent import futures
 from pathlib import Path
 
@@ -68,7 +69,17 @@ class WorkerServicer(rpc.WorkerServiceServicer):
         self._authenticate(context)
         if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", request.worker_id):
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, "Invalid worker ID")
-        claimed = self._store.claim_next_job(request.worker_id)
+        if request.instance_id:
+            try:
+                if str(uuid.UUID(request.instance_id)) != request.instance_id:
+                    raise ValueError()
+            except ValueError:
+                context.abort(
+                    grpc.StatusCode.INVALID_ARGUMENT, "Invalid worker instance ID"
+                )
+        claimed = self._store.claim_next_job(
+            request.worker_id, instance_id=request.instance_id
+        )
         if claimed is None:
             return pb.WorkerClaimResponse()
         job = claimed.job
@@ -101,6 +112,24 @@ class WorkerServicer(rpc.WorkerServiceServicer):
             input_size=size,
             traceparent=job.traceparent,
             tracestate=job.tracestate,
+        )
+
+    def ReportAvailability(self, request, context):
+        self._authenticate(context)
+        if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", request.worker_id):
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "Invalid worker ID")
+        try:
+            if str(uuid.UUID(request.instance_id)) != request.instance_id:
+                raise ValueError()
+        except ValueError:
+            context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT, "Invalid worker instance ID"
+            )
+        accepted = self._store.report_availability(
+            request.worker_id, request.instance_id, request.ready
+        )
+        return pb.WorkerAvailabilityResponse(
+            accepted=accepted, ttl_seconds=self._store.availability_ttl_seconds
         )
 
     def Download(self, request, context):
