@@ -285,9 +285,11 @@ class RemoteWorker:
                 raise ValueError("Transcription result exceeds protocol limit")
             ack = self._call(self.stub.Complete, completion)
             logger.info(
-                "Worker result accepted"
+                "Worker result accepted: worker=%s job=%s"
                 if ack.accepted
-                else "Worker result rejected after lease loss"
+                else "Worker result rejected after lease loss: worker=%s job=%s",
+                self.config.worker_id,
+                claim.job_id,
             )
 
     def _fail(self, request, lease_lost, code, retryable):
@@ -318,6 +320,7 @@ def main():
         token = read_token(config.token_file)
         # Load dependencies and model before leasing any task.
         engine = FasterWhisperEngine()
+        logger.info("Remote worker ready: worker=%s", config.worker_id)
         shutdown_telemetry = init_telemetry("whisper-remote-worker")
         with open_channel(config) as channel:
             worker = RemoteWorker(
