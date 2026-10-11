@@ -7,9 +7,42 @@ on:
     branches: [main]
 
 jobs:
+  check:
+    name: Checks
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: versions
+        run: make ci-versions >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ steps.versions.outputs.python }}
+      - uses: bufbuild/buf-setup-action@v1
+        with:
+          version: ${{ steps.versions.outputs.buf }}
+      - run: make install-poetry install
+      - name: Check against the previous published contract
+        run: make check
+        env:
+          PROTO_BREAKING_AGAINST: .git#ref=${{ github.event.pull_request.base.sha || github.event.before }},subdir=proto
+      - name: Start isolated test database
+        run: make test-db-up
+      - name: Check real PostgreSQL and worker RPCs
+        run: make test-integration
+        env:
+          TRANSCRIBER_TEST_DATABASE_URL: postgresql://pilot:synthetic-ci-password@127.0.0.1:55439/transcriber_pilot
+      - name: Stop isolated test database
+        if: always()
+        run: make test-db-down
+      - name: Build images
+        run: make build
+
   deploy:
     name: Deploy to VM
     runs-on: ubuntu-24.04
+    needs: check
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
 
     steps:

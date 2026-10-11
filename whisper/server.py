@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import contextlib
-import dataclasses
-import json
 import logging
 import os
+import re
+import signal
 import threading
 import time
+import uuid
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -17,65 +18,23 @@ from opentelemetry import trace
 from opentelemetry.trace import SpanKind, Status, StatusCode
 
 from proto import whisper_pb2, whisper_pb2_grpc
-from whisper.storage import ClaimedJob, JobRecord, JobStore
+from whisper.inference import FasterWhisperEngine, InferenceStopped
+from whisper.storage import (
+    ClaimedJob,
+    JobRecord,
+    JobStore,
+    UploadBusy,
+    UploadConflict,
+    UploadReservation,
+)
 from whisper.telemetry import context_from_carrier, current_trace_carrier
+from whisper.worker_api import start_worker_api
 
 logger = logging.getLogger(__name__)
 
 _JOB_TTL_S = int(os.getenv("JOB_TTL_S", "7200"))
 _WORKER_POLL_INTERVAL_S = float(os.getenv("WORKER_POLL_INTERVAL_S", "2"))
 _CLEANUP_INTERVAL_S = int(os.getenv("CLEANUP_INTERVAL_S", "600"))
-
-# ---------------------------------------------------------------------------
-# Transcription presets
-# ---------------------------------------------------------------------------
-
-_VOICE_PARAMS: dict = {
-    "language": "ru",
-    "beam_size": 5,
-    "temperature": 0.0,
-    "vad_filter": True,
-    "vad_parameters": {"min_silence_duration_ms": 500, "speech_pad_ms": 200},
-    "condition_on_previous_text": True,
-    "initial_prompt": "Разговорная речь на русском языке. Текст с правильными знаками препинания.",
-    "repetition_penalty": 1.2,
-    "no_speech_threshold": 0.5,
-}
-
-_LECTURE_PARAMS: dict = {
-    "language": "ru",
-    "beam_size": 7,
-    "temperature": 0.0,
-    "vad_filter": True,
-    "vad_parameters": {"min_silence_duration_ms": 500, "speech_pad_ms": 200},
-    "condition_on_previous_text": True,
-    "initial_prompt": (
-        "Академическая лекция на русском языке. "
-        "Текст с правильными знаками препинания и заглавными буквами."
-    ),
-    "repetition_penalty": 1.2,
-    "hallucination_silence_threshold": 3.0,
-    "no_speech_threshold": 0.5,
-}
-
-_MEETING_PARAMS: dict = {
-    "language": "ru",
-    "beam_size": 5,
-    "temperature": 0.0,
-    "vad_filter": True,
-    "vad_parameters": {"min_silence_duration_ms": 300, "speech_pad_ms": 150},
-    "condition_on_previous_text": True,
-    "initial_prompt": "Деловая встреча или разговор на русском языке. Текст с правильными знаками препинания.",
-    "repetition_penalty": 1.2,
-    "no_speech_threshold": 0.4,
-}
-
-PRESETS: dict[str, dict] = {
-    "auto": _VOICE_PARAMS,
-    "voice": _VOICE_PARAMS,
-    "lecture": _LECTURE_PARAMS,
-    "meeting": _MEETING_PARAMS,
-}
 
 _STATUS_MAP = {
     "accepted": whisper_pb2.ACCEPTED,
@@ -85,16 +44,6 @@ _STATUS_MAP = {
     "done": whisper_pb2.DONE,
     "failed": whisper_pb2.FAILED,
 }
-
-
-class _CancelledError(Exception):
-    """Raised inside the worker when a job is cancelled mid-transcription."""
-
-
-@dataclasses.dataclass(frozen=True)
-class _TranscriptionResult:
-    text: str
-    segments: list[dict[str, float | str]]
 
 
 class TranscriptionServicer(whisper_pb2_grpc.TranscriptionServiceServicer):
@@ -111,7 +60,7 @@ class TranscriptionServicer(whisper_pb2_grpc.TranscriptionServiceServicer):
             return whisper_pb2.TranscribeResponse()
 
         job_id = submit_resp.job_id
-        while True:
+        while context.is_active():
             time.sleep(1)
             status_resp = self.GetStatus(
                 whisper_pb2.StatusRequest(job_id=job_id),
@@ -123,6 +72,7 @@ class TranscriptionServicer(whisper_pb2_grpc.TranscriptionServiceServicer):
                 context.set_code(grpc.StatusCode.INTERNAL)
                 context.set_details(status_resp.error)
                 return whisper_pb2.TranscribeResponse()
+        context.abort(grpc.StatusCode.CANCELLED, "Transcription request closed")
 
     def Submit(
         self,
@@ -136,47 +86,121 @@ class TranscriptionServicer(whisper_pb2_grpc.TranscriptionServiceServicer):
             return whisper_pb2.SubmitResponse()
 
         fmt = first_chunk.format
+        if not re.fullmatch(r"[a-zA-Z0-9]{1,12}", fmt):
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "Invalid audio format")
+        # Existing clients had no total-upload limit. Keep it opt in for the
+        # ingress; the isolated pilot sets its own small synthetic input limit.
+        max_audio_bytes = int(os.getenv("MAX_AUDIO_BYTES", "0"))
         opts = first_chunk.options if first_chunk.HasField("options") else None
         preset = (opts.preset or "auto") if opts else "auto"
         language_override = opts.language if opts else ""
         initial_prompt_override = opts.initial_prompt if opts else ""
 
+        request_id = first_chunk.request_id
+        if request_id and not re.fullmatch(r"[A-Za-z0-9_.:-]{1,200}", request_id):
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "Invalid upload request ID")
         trace_carrier = current_trace_carrier()
-        job, input_path = self._store.create_job(
-            fmt=fmt,
-            preset=preset,
-            language_override=language_override,
-            initial_prompt_override=initial_prompt_override,
-            traceparent=trace_carrier.get("traceparent", ""),
-            tracestate=trace_carrier.get("tracestate", ""),
-        )
-        self._store.mark_downloading(job.job_id)
-
         try:
-            with input_path.open("wb") as fh:
-                fh.write(first_chunk.data)
-                for chunk in request_iterator:
-                    fh.write(chunk.data)
-        except Exception as exc:
-            logger.exception("Failed to persist upload for job %s", job.job_id)
-            self._store.fail_job(
-                job_id=job.job_id,
-                worker_id="",
-                error=f"upload failed: {exc}",
-                retryable=False,
+            with self._store.reserve_upload(
+                request_id=request_id,
+                retain_until_ack=first_chunk.retain_until_ack,
+                fmt=fmt,
+                preset=preset,
+                language_override=language_override,
+                initial_prompt_override=initial_prompt_override,
+                traceparent=trace_carrier.get("traceparent", ""),
+                tracestate=trace_carrier.get("tracestate", ""),
+            ) as upload:
+                return self._submit_reserved(
+                    upload,
+                    first_chunk,
+                    request_iterator,
+                    context,
+                    max_audio_bytes,
+                )
+        except UploadBusy:
+            context.abort(
+                grpc.StatusCode.ABORTED,
+                "Upload already in progress; retry the same request ID",
             )
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details("Failed to persist uploaded file")
-            return whisper_pb2.SubmitResponse()
+        except UploadConflict:
+            context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT,
+                "Request ID was reused with different upload options",
+            )
 
+    def _submit_reserved(
+        self,
+        upload: UploadReservation,
+        first_chunk,
+        request_iterator,
+        context,
+        max_audio_bytes,
+    ):
+        job = upload.job
+        if not upload.needs_upload:
+            position = (
+                self._store.queue_position(job.job_id)
+                if job.status in {"queued", "running"}
+                else 0
+            )
+            return whisper_pb2.SubmitResponse(
+                job_id=job.job_id, queue_position=position
+            )
+        self._store.mark_downloading(job.job_id)
+        # Only the holder of this request's session lock can touch partials.
+        for previous in upload.input_path.parent.glob("upload-*.part"):
+            previous.unlink(missing_ok=True)
+        temporary = upload.input_path.with_name(f"upload-{uuid.uuid4().hex}.part")
+        too_large = False
+        try:
+            with temporary.open("xb") as audio:
+                total = 0
+                for chunk in _prepend(first_chunk, request_iterator):
+                    total += len(chunk.data)
+                    if max_audio_bytes > 0 and total > max_audio_bytes:
+                        too_large = True
+                        raise ValueError("input_too_large")
+                    audio.write(chunk.data)
+                audio.flush()
+                os.fsync(audio.fileno())
+            os.replace(temporary, upload.input_path)
+            directory_fd = os.open(upload.input_path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            if job.request_id and not too_large:
+                self._store.mark_upload_interrupted(job.job_id)
+            else:
+                self._store.fail_job(
+                    job_id=job.job_id,
+                    worker_id="",
+                    error="input_too_large" if too_large else "upload_failed",
+                    retryable=False,
+                )
+            logger.error("Failed to persist upload for job %s", job.job_id)
+            context.abort(
+                grpc.StatusCode.RESOURCE_EXHAUSTED
+                if too_large
+                else grpc.StatusCode.INTERNAL,
+                "Audio upload exceeds the configured limit"
+                if too_large
+                else "Upload interrupted; retry the same request ID",
+            )
         queue_position = self._store.mark_queued(job.job_id)
+        if queue_position is None:
+            context.abort(grpc.StatusCode.CANCELLED, "Upload was cancelled")
+        # Query after the state transition to include the new queued row.
+        queue_position = self._store.queue_position(job.job_id)
         logger.info(
-            "Job submitted: id=%s preset=%s queue_position=%d",
-            job.job_id,
-            preset,
-            queue_position,
+            "Job submitted: id=%s queue_position=%d", job.job_id, queue_position
         )
-        return whisper_pb2.SubmitResponse(job_id=job.job_id, queue_position=queue_position)
+        return whisper_pb2.SubmitResponse(
+            job_id=job.job_id, queue_position=queue_position
+        )
 
     def GetStatus(
         self,
@@ -219,39 +243,65 @@ class TranscriptionServicer(whisper_pb2_grpc.TranscriptionServiceServicer):
             logger.info("Job cancel requested: %s", request.job_id)
         return whisper_pb2.CancelResponse(cancelled=cancelled)
 
+    def Ack(self, request, context):
+        if not request.job_id:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "Job ID required")
+        if self._store.acknowledge_job(request.job_id):
+            return whisper_pb2.AckResponse(acknowledged=True)
+        if self._store.get_job(request.job_id) is None:
+            context.abort(grpc.StatusCode.NOT_FOUND, "Job not found")
+        context.abort(
+            grpc.StatusCode.FAILED_PRECONDITION,
+            "Only terminal jobs can be acknowledged",
+        )
+
+
+def _prepend(first, remaining):
+    yield first
+    yield from remaining
+
 
 class Worker:
     def __init__(self, store: JobStore):
-        from faster_whisper import WhisperModel
-
         self._store = store
-        self._worker_id = os.getenv("WORKER_ID", f"worker-{os.getpid()}")
-        model_size = os.getenv("WHISPER_MODEL", "small")
-        cpu_threads = int(os.getenv("WHISPER_CPU_THREADS", "2"))
-        logger.info(
-            "Loading Whisper model '%s' for worker %s (cpu_threads=%d)...",
-            model_size,
-            self._worker_id,
-            cpu_threads,
-        )
-        self._model = WhisperModel(
-            model_size,
-            device="cpu",
-            compute_type="int8",
-            cpu_threads=cpu_threads,
-        )
-        logger.info("Whisper model loaded for worker %s.", self._worker_id)
+        self._worker_id = os.getenv("WORKER_ID", f"worker-{uuid.uuid4()}")
+        self._engine = FasterWhisperEngine()
 
-    def run_forever(self) -> None:
-        while True:
-            claimed = self._store.claim_next_job(self._worker_id)
-            if claimed is None:
-                time.sleep(_WORKER_POLL_INTERVAL_S)
-                continue
-            self._process_claimed_job(claimed)
+    def run_forever(self, stop: threading.Event | None = None) -> None:
+        stop = stop or threading.Event()
+        while not stop.is_set():
+            try:
+                claimed = self._store.claim_next_job(self._worker_id)
+                if claimed is not None:
+                    self._process_claimed_job(claimed, stop)
+                    continue
+            except Exception:
+                # Connection errors can contain a DSN; do not log exception text.
+                logger.error("Worker queue operation failed")
+            stop.wait(_WORKER_POLL_INTERVAL_S)
 
-    def _process_claimed_job(self, claimed: ClaimedJob) -> None:
+    def _process_claimed_job(self, claimed: ClaimedJob, stop: threading.Event) -> None:
         job = claimed.job
+        lease_lost = threading.Event()
+        finished = threading.Event()
+        progress = [0.0]
+
+        def heartbeat() -> None:
+            while not finished.is_set():
+                try:
+                    if not self._store.heartbeat(
+                        job.job_id, claimed.lease_owner, progress[0]
+                    ):
+                        lease_lost.set()
+                        return
+                except Exception:
+                    lease_lost.set()
+                    return
+                if finished.wait(min(30.0, self._store.lease_seconds / 3)):
+                    return
+
+        heartbeat_thread = threading.Thread(target=heartbeat, daemon=True)
+        heartbeat_thread.start()
         parent_context = context_from_carrier(job.traceparent, job.tracestate)
         tracer = trace.get_tracer("transcriber.worker")
         with tracer.start_as_current_span(
@@ -260,92 +310,52 @@ class Worker:
             kind=SpanKind.CONSUMER,
             attributes={
                 "transcription.job.id": job.job_id,
-                "transcription.preset": job.preset,
                 "transcription.attempt": job.attempts,
             },
         ) as span:
-            self._process_claimed_job_traced(job, span)
+            try:
+                result = self._engine.transcribe(
+                    job.input_path,
+                    preset=job.preset,
+                    language=job.language_override,
+                    initial_prompt=job.initial_prompt_override,
+                    on_progress=lambda value: progress.__setitem__(0, value),
+                    should_stop=_AnyEvent(stop, lease_lost),
+                )
+                if stop.is_set() or lease_lost.is_set():
+                    raise InferenceStopped()
+                accepted = self._store.complete_job(
+                    job_id=job.job_id,
+                    worker_id=claimed.lease_owner,
+                    text=result.text,
+                    segments=result.segments,
+                    result_path="",
+                )
+                logger.info(
+                    "Local job completion: job=%s accepted=%s", job.job_id, accepted
+                )
+            except InferenceStopped:
+                logger.info("Local job stopped: job=%s", job.job_id)
+            except Exception:
+                span.set_status(Status(StatusCode.ERROR, "transcription_failed"))
+                logger.error("Local inference failed: job=%s", job.job_id)
+                self._store.fail_job(
+                    job_id=job.job_id,
+                    worker_id=claimed.lease_owner,
+                    error="transcription_failed",
+                    retryable=True,
+                )
+            finally:
+                finished.set()
+                heartbeat_thread.join(timeout=5)
 
-    def _process_claimed_job_traced(self, job: JobRecord, span: trace.Span) -> None:
-        logger.info(
-            "Processing job: id=%s preset=%s attempt=%d/%d",
-            job.job_id,
-            job.preset,
-            job.attempts,
-            job.max_attempts,
-        )
-        try:
-            result = self._transcribe_file(job)
-            result_path = self._write_result(job, result)
-            self._store.complete_job(
-                job_id=job.job_id,
-                worker_id=self._worker_id,
-                text=result.text,
-                segments=result.segments,
-                result_path=str(result_path),
-            )
-            logger.info(
-                "Job done: id=%s chars=%d segments=%d",
-                job.job_id,
-                len(result.text),
-                len(result.segments),
-            )
-            span.set_attribute("transcription.result.chars", len(result.text))
-            span.set_attribute("transcription.result.segments", len(result.segments))
-        except _CancelledError:
-            logger.info("Job cancelled mid-transcription: %s", job.job_id)
-            self._store.fail_job(
-                job_id=job.job_id,
-                worker_id=self._worker_id,
-                error="cancelled",
-                retryable=False,
-            )
-        except Exception as exc:
-            span.record_exception(exc)
-            span.set_status(Status(StatusCode.ERROR, str(exc)))
-            logger.exception("Job failed: id=%s", job.job_id)
-            self._store.fail_job(
-                job_id=job.job_id,
-                worker_id=self._worker_id,
-                error=str(exc),
-                retryable=True,
-            )
 
-    def _transcribe_file(self, job: JobRecord) -> _TranscriptionResult:
-        params = dict(PRESETS.get(job.preset, PRESETS["voice"]))
-        if job.language_override:
-            params["language"] = job.language_override
-        if job.initial_prompt_override:
-            params["initial_prompt"] = job.initial_prompt_override
+class _AnyEvent:
+    def __init__(self, *events: threading.Event):
+        self._events = events
 
-        include_segments = job.preset == "lecture"
-        segments_iter, info = self._model.transcribe(job.input_path, **params)
-        total_duration = max(float(getattr(info, "duration", 0.0) or 0.0), 0.0)
-        parts: list[str] = []
-        segments: list[dict[str, float | str]] = []
-        for seg in segments_iter:
-            current = self._store.get_job(job.job_id)
-            if current is None or current.status == "failed" and current.error == "cancelled":
-                raise _CancelledError()
-            text = seg.text.strip()
-            parts.append(text)
-            if include_segments:
-                segments.append({"start": float(seg.start), "end": float(seg.end), "text": text})
-            if total_duration > 0:
-                progress = min(max((float(seg.end) / total_duration) * 100.0, 0.0), 99.0)
-                self._store.heartbeat(job.job_id, self._worker_id, progress)
-
-        return _TranscriptionResult(text=" ".join(parts).strip(), segments=segments)
-
-    def _write_result(self, job: JobRecord, result: _TranscriptionResult) -> Path:
-        result_path = Path(job.input_path).with_name("result.json")
-        payload = {
-            "job_id": job.job_id,
-            "text": result.text,
-            "segments": result.segments,
-        }
-        result_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        return result_path
+    def is_set(self) -> bool:
+        return any(event.is_set() for event in self._events)
 
 
 class CleanupWorker:
@@ -355,9 +365,12 @@ class CleanupWorker:
     def run_forever(self) -> None:
         while True:
             time.sleep(_CLEANUP_INTERVAL_S)
-            deleted = self._store.cleanup_expired_jobs(_JOB_TTL_S)
-            if deleted:
-                logger.debug("Cleaned up %d expired jobs", deleted)
+            try:
+                deleted = self._store.cleanup_expired_jobs(_JOB_TTL_S)
+                if deleted:
+                    logger.debug("Cleaned up %d expired jobs", deleted)
+            except Exception:
+                logger.error("Queue cleanup failed")
 
 
 def run_ingress() -> None:
@@ -383,8 +396,21 @@ def run_ingress() -> None:
         TranscriptionServicer(store),
         server,
     )
-    server.add_insecure_port(f"[::]:{port}")
+    if not server.add_insecure_port(f"{os.getenv('GRPC_BIND_HOST', '[::]')}:{port}"):
+        raise ValueError("Cannot bind transcription endpoint")
+    worker_server = start_worker_api(store)
+    threading.Thread(
+        target=CleanupWorker(store).run_forever, daemon=True, name="cleanup-worker"
+    ).start()
     server.start()
+
+    def stop_servers(*_):
+        if worker_server is not None:
+            worker_server.stop(5)
+        server.stop(5)
+
+    signal.signal(signal.SIGTERM, stop_servers)
+    signal.signal(signal.SIGINT, stop_servers)
     logger.info("Whisper ingress gRPC server started on port %s", port)
     server.wait_for_termination()
 
@@ -392,9 +418,10 @@ def run_ingress() -> None:
 def run_worker() -> None:
     store = JobStore()
     store.init_schema()
-    cleanup = CleanupWorker(store)
-    threading.Thread(target=cleanup.run_forever, daemon=True, name="cleanup-worker").start()
-    Worker(store).run_forever()
+    stop = threading.Event()
+    signal.signal(signal.SIGTERM, lambda *_: stop.set())
+    signal.signal(signal.SIGINT, lambda *_: stop.set())
+    Worker(store).run_forever(stop)
 
 
 def safe_remove_job_dir(job: JobRecord) -> None:

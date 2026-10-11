@@ -1,72 +1,30 @@
-# CLAUDE.md
+# Transcriber context
 
-## Project Overview
+Read README.md and docs/distributed-workers.md for current commands, constraints
+and the verified runtime audit. This repository owns proto/whisper.proto.
 
-Standalone Whisper gRPC transcription service. Shared across multiple projects via Docker network `whisper-net`.
-Clients: `transcriber-bot` (Go), `notes_bot` (Go).
+- Python/Poetry versions and image/tool versions: versions.mk; dependencies and
+  grpcio-tools generator: pyproject.toml/poetry.lock. Do not hand-edit generated
+  proto/*_pb2*.py or .pyi files; `make proto-gen` regenerates ignored artifacts.
+- Ingress accepts streaming Submit and exposes GetStatus/Cancel. PostgreSQL
+  holds job metadata/results/leases; the ingress filesystem holds uploaded audio.
+- Local worker uses JobStore; optional remote workers use a separate authenticated
+  WorkerService. Ordinary deployment does not publish a worker endpoint.
+- whisper/inference.py is shared CPU/CUDA inference. Mac CPU works; Metal is a
+  future backend. whisper/remote_worker.py is a native pull process for Mac/WSL.
+- Every attempt gets a unique token; SQL mutations require current token, running
+  status and live lease. Heartbeats run independently from yielded segments.
+- Cleanup belongs to ingress. Waiting jobs are not expired by finished-job TTL;
+  completed results are currently retained only JOB_TTL_S (default 2 hours).
+- notes-bot frontend delivery is not durable yet. Do not disable its permanent
+  worker or claim safe overnight delivery until that consumer is adapted.
 
-**Language:** Python 3.11+
-**Package manager:** Poetry (`pyproject.toml`)
-**Deployment:** Docker Compose
+`make install`, `make format`, `make check`, `make test-integration`, `make build`
+are the shared developer/CI entry points. Integration DB must be explicitly
+isolated; tests never contact Telegram or production. `make pilot
+PILOT_AUDIO_FILE=/path/to/synthetic.wav` uses temporary Docker/PostgreSQL and a
+cached CPU model, without model/image downloads or production tasks.
 
-## Key Files
-
-| File | Purpose |
-|------|---------|
-| `whisper/server.py` | `TranscriptionServicer` — async job queue, single CPU worker thread |
-| `whisper/main.py` | gRPC server entry point — binds to `[::]`, keepalive options, `max_workers=8` |
-| `proto/whisper.proto` | gRPC service definition — source of truth for ALL clients |
-| `proto/whisper_pb2.py` | Generated Python stubs (do not edit) |
-| `proto/whisper_pb2_grpc.py` | Generated Python stubs (do not edit) |
-| `docker-compose.yml` | Single `whisper` service on `whisper-net`, no `ports:` directive |
-| `Makefile` | Dev and deploy commands |
-
-## Running & Building
-
-```bash
-docker network create whisper-net  # once, on any machine
-make up                            # build and start
-make deploy                        # full rebuild --no-cache
-make logs                          # follow logs
-make restart                       # restart whisper container
-make proto                         # regenerate Python stubs
-make install                       # Poetry install (local dev)
-make clean                         # remove __pycache__
-```
-
-## Architecture Notes
-
-- Single background thread processes jobs sequentially (CPU-bound, avoids OOM)
-- `Submit` RPC: queues job, returns `job_id` + queue position immediately
-- `GetStatus` RPC: polls in-memory dict for job status/result
-- `Transcribe` RPC (legacy): routes through same queue, blocks until done
-- Cleanup thread removes jobs older than `JOB_TTL_S` (default 7200s)
-- `max_workers=8` in gRPC server (for concurrent file receives, not inference)
-- Service binds to `[::]` — security handled by Docker network isolation (no `ports:`)
-
-## Proto / gRPC
-
-`proto/whisper.proto` is the single source of truth. All clients must conform to it.
-
-When changing the proto:
-
-```bash
-make proto  # regenerates proto/whisper_pb2.py and proto/whisper_pb2_grpc.py
-```
-
-Also fixes the relative import in `whisper_pb2_grpc.py` via `sed`.
-
-## Environment Variables
-
-Set in `docker-compose.yml` or overridden in `.env`:
-- `GRPC_PORT` — default `50053`
-- `WHISPER_MODEL` — default `small`
-- `JOB_TTL_S` — default `7200`
-- `TRANSCRIBE_QUEUE_TIMEOUT_S` — default `600`
-
-## Common Pitfalls
-
-- `whisper-net` Docker network must be created before `make up`
-- First start downloads the model — slow, check logs with `make logs`
-- `proto/whisper_pb2_grpc.py` import path is fixed by `sed` after generation — do not manually edit the import
-- Port is NOT published to host — this is intentional; only containers in `whisper-net` can reach it
+Keep token files out of Git/logs/command arguments. Remote plaintext is loopback
+through SSH or an explicitly trusted VPN; the built-in worker listener has no
+TLS. No changes to production services as a side effect of testing.

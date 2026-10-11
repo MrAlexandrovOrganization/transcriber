@@ -1,6 +1,11 @@
-FROM python:3.11-slim AS proto-builder
+# check=skip=InvalidDefaultArgInFrom
 
-RUN pip install --no-cache-dir grpcio-tools==1.80.0
+# Required version arguments are supplied by Make/Compose, without fallback pins.
+ARG PYTHON_VERSION
+FROM python:${PYTHON_VERSION}-slim AS proto-builder
+
+ARG GRPCIO_TOOLS_VERSION
+RUN pip install --no-cache-dir grpcio-tools==${GRPCIO_TOOLS_VERSION}
 
 WORKDIR /proto-build
 COPY proto/ ./proto/
@@ -12,13 +17,14 @@ RUN python -m grpc_tools.protoc \
         proto/whisper.proto
 
 
-FROM python:3.11-slim
+FROM python:${PYTHON_VERSION}-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir poetry==2.2.1
+ARG POETRY_VERSION
+RUN pip install --no-cache-dir poetry==${POETRY_VERSION}
 
 WORKDIR /app
 

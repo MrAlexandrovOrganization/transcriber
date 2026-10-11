@@ -4,5 +4,7 @@
 *_pb2.py
 *_pb2.pyi
 __pycache__
+.secrets/
+.venv/
 
 bot/gen/

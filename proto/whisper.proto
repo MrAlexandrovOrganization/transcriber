@@ -15,6 +15,69 @@ service TranscriptionService {
 
   // Cancel a pending or running job.
   rpc Cancel(CancelRequest) returns (CancelResponse);
+
+  // Confirm durable receipt of a terminal result or error.
+  rpc Ack(AckRequest) returns (AckResponse);
+}
+
+// Optional, separately authenticated endpoint for workers outside Docker.
+// Each claim has a fresh lease token; expired owners cannot publish results.
+service WorkerService {
+  rpc Claim(WorkerClaimRequest) returns (WorkerClaimResponse);
+  rpc Download(WorkerJobRequest) returns (stream WorkerAudioChunk);
+  rpc Heartbeat(WorkerHeartbeatRequest) returns (WorkerAck);
+  rpc Complete(WorkerCompleteRequest) returns (WorkerAck);
+  rpc Fail(WorkerFailRequest) returns (WorkerAck);
+}
+
+message WorkerClaimRequest {
+  string worker_id = 1;
+}
+
+message WorkerClaimResponse {
+  // Empty when no work is available.
+  string job_id = 1;
+  string lease_token = 2;
+  int32 lease_seconds = 3;
+  string format = 4;
+  TranscriptionOptions options = 5;
+  int64 input_size = 6;
+  string traceparent = 7;
+  string tracestate = 8;
+}
+
+message WorkerJobRequest {
+  string job_id = 1;
+  string lease_token = 2;
+}
+
+message WorkerAudioChunk {
+  bytes data = 1;
+}
+
+message WorkerHeartbeatRequest {
+  string job_id = 1;
+  string lease_token = 2;
+  float progress_percent = 3;
+}
+
+message WorkerCompleteRequest {
+  string job_id = 1;
+  string lease_token = 2;
+  string text = 3;
+  repeated Segment segments = 4;
+}
+
+message WorkerFailRequest {
+  string job_id = 1;
+  string lease_token = 2;
+  // A stable error code; never send exception text or credentials.
+  string error_code = 3;
+  bool retryable = 4;
+}
+
+message WorkerAck {
+  bool accepted = 1;
 }
 
 message CancelRequest {
@@ -23,6 +86,14 @@ message CancelRequest {
 
 message CancelResponse {
   bool cancelled = 1; // true if job was found and marked for cancellation
+}
+
+message AckRequest {
+  string job_id = 1;
+}
+
+message AckResponse {
+  bool acknowledged = 1;
 }
 
 // Transcription preset and optional overrides.
@@ -45,6 +116,11 @@ message TranscribeChunk {
   bytes data = 1;
   string format = 2; // first chunk: file format ("ogg", "mp4", etc.)
   TranscriptionOptions options = 3; // first chunk: transcription options (optional)
+  // First chunk only. Caller-scoped unique identity, e.g. notes-bot:<UUID>.
+  // Replays must refer to the same audio bytes and options.
+  string request_id = 4;
+  // First chunk only. Preserve terminal result/error until explicit Ack.
+  bool retain_until_ack = 5;
 }
 
 message TranscribeResponse {

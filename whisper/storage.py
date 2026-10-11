@@ -8,7 +8,7 @@ import json
 import logging
 import os
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 import psycopg
@@ -18,6 +18,11 @@ from psycopg.types.json import Json
 logger = logging.getLogger(__name__)
 
 UTC = timezone.utc
+SQL_DIR = Path(__file__).with_name("sql")
+
+
+def _sql(name: str) -> str:
+    return (SQL_DIR / f"{name}.sql").read_text(encoding="utf-8")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -44,6 +49,9 @@ class JobRecord:
     segments_json: str
     traceparent: str
     tracestate: str
+    request_id: str = ""
+    retain_until_ack: bool = False
+    acknowledged_at: datetime | None = None
 
     @property
     def segments(self) -> list[dict[str, float | str]]:
@@ -59,13 +67,34 @@ class ClaimedJob:
     lease_expires_at: datetime
 
 
+class UploadBusy(Exception):
+    """Another stream is uploading the same client request."""
+
+
+class UploadConflict(Exception):
+    """A client request ID was reused with different immutable options."""
+
+
+@dataclasses.dataclass(frozen=True)
+class UploadReservation:
+    job: JobRecord
+    input_path: Path
+    needs_upload: bool
+
+
 class JobStore:
     def __init__(self) -> None:
         self._dsn = os.environ["DATABASE_URL"]
         self._lease_seconds = int(os.getenv("JOB_LEASE_SECONDS", "900"))
         self._max_attempts = int(os.getenv("JOB_MAX_ATTEMPTS", "3"))
         self._storage_root = Path(os.getenv("JOB_STORAGE_DIR", "/data/jobs"))
+        if self._lease_seconds < 3 or self._max_attempts < 1:
+            raise ValueError("Lease must be >= 3 seconds and max attempts >= 1")
         self._storage_root.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def lease_seconds(self) -> int:
+        return self._lease_seconds
 
     @property
     def storage_root(self) -> Path:
@@ -75,47 +104,25 @@ class JobStore:
         return psycopg.connect(self._dsn, row_factory=dict_row)
 
     def init_schema(self) -> None:
+        # Keep the established startup migration policy, now with a ledger and
+        # one transaction/advisory lock shared by ingress and local workers.
         with self.connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS transcription_jobs (
-                        job_id TEXT PRIMARY KEY,
-                        status TEXT NOT NULL,
-                        format TEXT NOT NULL,
-                        preset TEXT NOT NULL,
-                        language_override TEXT NOT NULL DEFAULT '',
-                        initial_prompt_override TEXT NOT NULL DEFAULT '',
-                        input_path TEXT NOT NULL,
-                        result_path TEXT NOT NULL DEFAULT '',
-                        error TEXT NOT NULL DEFAULT '',
-                        progress_percent REAL NOT NULL DEFAULT 0,
-                        attempts INTEGER NOT NULL DEFAULT 0,
-                        max_attempts INTEGER NOT NULL,
-                        lease_owner TEXT NOT NULL DEFAULT '',
-                        lease_expires_at TIMESTAMPTZ,
-                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                        started_at TIMESTAMPTZ,
-                        finished_at TIMESTAMPTZ,
-                        text TEXT NOT NULL DEFAULT '',
-                        segments_json JSONB NOT NULL DEFAULT '[]'::jsonb
+            conn.execute("SELECT pg_advisory_xact_lock(812409715031)")
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS transcriber_schema_migrations "
+                "(version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())"
+            )
+            for migration in sorted((SQL_DIR / "migrations").glob("*.sql")):
+                applied = conn.execute(
+                    "SELECT version FROM transcriber_schema_migrations WHERE version = %s",
+                    (migration.name,),
+                ).fetchone()
+                if applied is None:
+                    conn.execute(migration.read_text(encoding="utf-8"))
+                    conn.execute(
+                        "INSERT INTO transcriber_schema_migrations (version) VALUES (%s)",
+                        (migration.name,),
                     )
-                    """
-                )
-                cur.execute(
-                    "ALTER TABLE transcription_jobs ADD COLUMN IF NOT EXISTS traceparent TEXT NOT NULL DEFAULT ''"
-                )
-                cur.execute(
-                    "ALTER TABLE transcription_jobs ADD COLUMN IF NOT EXISTS tracestate TEXT NOT NULL DEFAULT ''"
-                )
-                cur.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_transcription_jobs_claim ON transcription_jobs (status, lease_expires_at, created_at)"
-                )
-                cur.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_transcription_jobs_updated_at ON transcription_jobs (updated_at)"
-                )
-            conn.commit()
 
     def create_job(
         self,
@@ -126,6 +133,8 @@ class JobStore:
         initial_prompt_override: str,
         traceparent: str = "",
         tracestate: str = "",
+        request_id: str = "",
+        retain_until_ack: bool = False,
     ) -> tuple[JobRecord, Path]:
         job_id = str(uuid.uuid4())
         job_dir = self._storage_root / job_id
@@ -145,8 +154,10 @@ class JobStore:
                         input_path,
                         max_attempts,
                         traceparent,
-                        tracestate
-                    ) VALUES (%s, 'accepted', %s, %s, %s, %s, %s, %s, %s, %s)
+                        tracestate,
+                        request_id,
+                        retain_until_ack
+                    ) VALUES (%s, 'accepted', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING *
                     """,
                     (
@@ -159,16 +170,106 @@ class JobStore:
                         self._max_attempts,
                         traceparent,
                         tracestate,
+                        request_id,
+                        retain_until_ack,
                     ),
                 )
                 row = cur.fetchone()
             conn.commit()
         return self._row_to_job(row), input_path
 
+    @contextlib.contextmanager
+    def reserve_upload(
+        self,
+        *,
+        request_id: str,
+        retain_until_ack: bool,
+        fmt: str,
+        preset: str,
+        language_override: str,
+        initial_prompt_override: str,
+        traceparent: str = "",
+        tracestate: str = "",
+    ):
+        # A session lock spans streaming without keeping a database transaction
+        # open. PostgreSQL releases it automatically when the process crashes.
+        # A concurrent duplicate fails fast rather than consuming an RPC thread.
+        with self.connect() as connection:
+            if request_id:
+                locked = connection.execute(
+                    "SELECT pg_try_advisory_lock(hashtextextended(%s, 0)) AS locked",
+                    (request_id,),
+                ).fetchone()["locked"]
+                connection.commit()
+                if not locked:
+                    raise UploadBusy()
+            try:
+                row = None
+                if request_id:
+                    row = connection.execute(
+                        _sql("upload_lookup"),
+                        (request_id,),
+                    ).fetchone()
+                    connection.commit()
+                if row:
+                    job = self._row_to_job(row)
+                    identity = (
+                        job.format,
+                        job.preset,
+                        job.language_override,
+                        job.initial_prompt_override,
+                        job.retain_until_ack,
+                    )
+                    if identity != (
+                        fmt,
+                        preset,
+                        language_override,
+                        initial_prompt_override,
+                        retain_until_ack,
+                    ):
+                        raise UploadConflict()
+                    input_path = Path(job.input_path)
+                else:
+                    job, input_path = self.create_job(
+                        fmt=fmt,
+                        preset=preset,
+                        language_override=language_override,
+                        initial_prompt_override=initial_prompt_override,
+                        traceparent=traceparent,
+                        tracestate=tracestate,
+                        request_id=request_id,
+                        retain_until_ack=retain_until_ack,
+                    )
+                yield UploadReservation(
+                    job=job,
+                    input_path=input_path,
+                    needs_upload=job.status in {"accepted", "downloading"},
+                )
+            finally:
+                if request_id:
+                    connection.execute(
+                        "SELECT pg_advisory_unlock(hashtextextended(%s, 0))",
+                        (request_id,),
+                    )
+                    connection.commit()
+
+    def queue_position(self, job_id: str) -> int:
+        with self.connect() as conn:
+            row = conn.execute(_sql("queue_position"), (job_id,)).fetchone()
+        return int(row["count"])
+
+    def mark_upload_interrupted(self, job_id: str) -> None:
+        with self.connect() as conn:
+            conn.execute(_sql("upload_interrupted"), (job_id,))
+
+    def acknowledge_job(self, job_id: str) -> bool:
+        with self.connect() as conn:
+            return conn.execute(_sql("ack"), (job_id,)).fetchone() is not None
+
     def mark_downloading(self, job_id: str) -> None:
         self._update_status(job_id, status="downloading")
 
-    def mark_queued(self, job_id: str) -> int:
+    def mark_queued(self, job_id: str) -> int | None:
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -178,7 +279,7 @@ class JobStore:
                         progress_percent = 0,
                         error = '',
                         updated_at = NOW()
-                    WHERE job_id = %s
+                    WHERE job_id = %s AND status IN ('accepted', 'downloading')
                     RETURNING (
                         SELECT COUNT(*)
                         FROM transcription_jobs q
@@ -191,13 +292,15 @@ class JobStore:
                 row = cur.fetchone()
             conn.commit()
         if row is None:
-            raise KeyError(job_id)
+            return None
         return int(row["queue_position"])
 
     def get_job(self, job_id: str) -> JobRecord | None:
         with self.connect() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT * FROM transcription_jobs WHERE job_id = %s", (job_id,))
+                cur.execute(
+                    "SELECT * FROM transcription_jobs WHERE job_id = %s", (job_id,)
+                )
                 row = cur.fetchone()
         if row is None:
             return None
@@ -227,66 +330,39 @@ class JobStore:
         return row is not None
 
     def claim_next_job(self, worker_id: str) -> ClaimedJob | None:
-        lease_expires_at = datetime.now(tz=UTC) + timedelta(seconds=self._lease_seconds)
+        # Fence each attempt independently, even across worker restarts/PID reuse.
+        lease_owner = f"{worker_id}/{uuid.uuid4()}"
         with self.connect() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    WITH candidate AS (
-                        SELECT job_id
-                        FROM transcription_jobs
-                        WHERE status IN ('queued', 'running')
-                          AND attempts < max_attempts
-                          AND (
-                              status = 'queued'
-                              OR lease_expires_at IS NULL
-                              OR lease_expires_at < NOW()
-                          )
-                        ORDER BY created_at
-                        FOR UPDATE SKIP LOCKED
-                        LIMIT 1
-                    )
-                    UPDATE transcription_jobs AS jobs
-                    SET status = 'running',
-                        attempts = jobs.attempts + 1,
-                        lease_owner = %s,
-                        lease_expires_at = %s,
-                        started_at = COALESCE(jobs.started_at, NOW()),
-                        updated_at = NOW(),
-                        error = CASE WHEN jobs.error = 'cancelled' THEN jobs.error ELSE '' END
-                    FROM candidate
-                    WHERE jobs.job_id = candidate.job_id
-                    RETURNING jobs.*
-                    """,
-                    (worker_id, lease_expires_at),
-                )
+                cur.execute(_sql("reap"))
+                cur.execute(_sql("claim"), (lease_owner, self._lease_seconds))
                 row = cur.fetchone()
             conn.commit()
         if row is None:
             return None
         return ClaimedJob(
             job=self._row_to_job(row),
-            lease_owner=worker_id,
-            lease_expires_at=lease_expires_at,
+            lease_owner=lease_owner,
+            lease_expires_at=row["lease_expires_at"],
         )
 
-    def heartbeat(self, job_id: str, worker_id: str, progress_percent: float) -> None:
-        lease_expires_at = datetime.now(tz=UTC) + timedelta(seconds=self._lease_seconds)
+    def get_owned_job(self, job_id: str, lease_owner: str) -> JobRecord | None:
+        with self.connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(_sql("owned"), (job_id, lease_owner))
+                row = cur.fetchone()
+        return self._row_to_job(row) if row else None
+
+    def heartbeat(self, job_id: str, worker_id: str, progress_percent: float) -> bool:
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
-                    UPDATE transcription_jobs
-                    SET lease_expires_at = %s,
-                        progress_percent = %s,
-                        updated_at = NOW()
-                    WHERE job_id = %s
-                      AND lease_owner = %s
-                      AND status = 'running'
-                    """,
-                    (lease_expires_at, progress_percent, job_id, worker_id),
+                    _sql("heartbeat"),
+                    (self._lease_seconds, progress_percent, job_id, worker_id),
                 )
+                accepted = cur.rowcount == 1
             conn.commit()
+        return accepted
 
     def complete_job(
         self,
@@ -296,72 +372,42 @@ class JobStore:
         text: str,
         segments: list[dict[str, float | str]],
         result_path: str,
-    ) -> None:
+    ) -> bool:
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
-                    UPDATE transcription_jobs
-                    SET status = 'done',
-                        text = %s,
-                        segments_json = %s,
-                        result_path = %s,
-                        progress_percent = 100,
-                        error = '',
-                        lease_owner = '',
-                        lease_expires_at = NULL,
-                        finished_at = NOW(),
-                        updated_at = NOW()
-                    WHERE job_id = %s
-                      AND lease_owner = %s
-                    """,
+                    _sql("complete"),
                     (text, Json(segments), result_path, job_id, worker_id),
                 )
+                accepted = cur.rowcount == 1
             conn.commit()
+        return accepted
 
-    def fail_job(self, *, job_id: str, worker_id: str, error: str, retryable: bool) -> None:
+    def fail_job(
+        self,
+        *,
+        job_id: str,
+        worker_id: str,
+        error: str,
+        retryable: bool,
+    ) -> bool:
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT attempts, max_attempts, status, error FROM transcription_jobs WHERE job_id = %s",
-                    (job_id,),
+                    _sql("fail"),
+                    (retryable, error, retryable, job_id, worker_id, worker_id),
                 )
-                row = cur.fetchone()
-                if row is None:
-                    conn.commit()
-                    return
-                attempts = int(row["attempts"])
-                max_attempts = int(row["max_attempts"])
-                next_status = "queued" if retryable and attempts < max_attempts else "failed"
-                finished_at_sql = "NOW()" if next_status == "failed" else "NULL"
-                cur.execute(
-                    f"""
-                    UPDATE transcription_jobs
-                    SET status = %s,
-                        error = %s,
-                        progress_percent = 0,
-                        lease_owner = '',
-                        lease_expires_at = NULL,
-                        finished_at = {finished_at_sql},
-                        updated_at = NOW()
-                    WHERE job_id = %s
-                      AND lease_owner = %s
-                    """,
-                    (next_status, error, job_id, worker_id),
-                )
+                accepted = cur.rowcount == 1
             conn.commit()
+        return accepted
 
     def cleanup_expired_jobs(self, ttl_seconds: int) -> int:
         with self.connect() as conn:
             with conn.cursor() as cur:
+                cur.execute(_sql("reap"))
                 cur.execute(
-                    """
-                    DELETE FROM transcription_jobs
-                    WHERE finished_at IS NOT NULL
-                      AND finished_at < NOW() - (%s * INTERVAL '1 second')
-                    RETURNING input_path, result_path
-                    """,
-                    (ttl_seconds,),
+                    _sql("cleanup"),
+                    (ttl_seconds, ttl_seconds),
                 )
                 rows = cur.fetchall()
             conn.commit()
@@ -376,6 +422,9 @@ class JobStore:
         for path in paths:
             with contextlib.suppress(OSError):
                 path.unlink()
+        for partial in paths[0].parent.glob("upload-*.part"):
+            with contextlib.suppress(OSError):
+                partial.unlink()
         if paths:
             job_dir = paths[0].parent
             with contextlib.suppress(OSError):
@@ -385,7 +434,7 @@ class JobStore:
         with self.connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE transcription_jobs SET status = %s, updated_at = NOW() WHERE job_id = %s",
+                    "UPDATE transcription_jobs SET status = %s, updated_at = NOW() WHERE job_id = %s AND status IN ('accepted', 'downloading')",
                     (status, job_id),
                 )
             conn.commit()
@@ -414,4 +463,7 @@ class JobStore:
             segments_json=json.dumps(row["segments_json"]),
             traceparent=row["traceparent"],
             tracestate=row["tracestate"],
+            request_id=row["request_id"],
+            retain_until_ack=row["retain_until_ack"],
+            acknowledged_at=row["acknowledged_at"],
         )
