@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hmac
 import logging
 import math
 import os
@@ -17,6 +16,7 @@ from proto import whisper_pb2 as pb
 from proto import whisper_pb2_grpc as rpc
 from whisper.limits import MAX_RESULT_BYTES
 from whisper.storage import JobStore
+from whisper.worker_auth import WorkerCredentials
 
 logger = logging.getLogger(__name__)
 
@@ -39,21 +39,33 @@ def read_worker_token(path: str) -> str:
 
 
 class WorkerServicer(rpc.WorkerServiceServicer):
-    def __init__(self, store: JobStore, token: str):
+    def __init__(self, store: JobStore, credentials: WorkerCredentials | str):
         self._store = store
-        self._authorization = f"Bearer {token}"
+        self._credentials = (
+            WorkerCredentials.legacy(credentials)
+            if isinstance(credentials, str)
+            else credentials
+        )
 
-    def _authenticate(self, context: grpc.ServicerContext) -> None:
+    def _authenticate(self, context, *, worker_id=None, lease_token=None):
         values = [
             m.value for m in context.invocation_metadata() if m.key == "authorization"
         ]
-        if len(values) != 1 or not hmac.compare_digest(values[0], self._authorization):
+        identity = (
+            self._credentials.authenticate(values[0]) if len(values) == 1 else None
+        )
+        if identity is None:
             context.abort(
                 grpc.StatusCode.UNAUTHENTICATED, "Worker authentication required"
             )
+        if identity and (
+            (worker_id is not None and identity != worker_id)
+            or (lease_token is not None and not lease_token.startswith(identity + "/"))
+        ):
+            context.abort(grpc.StatusCode.PERMISSION_DENIED, "Worker identity mismatch")
 
     def _owned(self, request, context):
-        self._authenticate(context)
+        self._authenticate(context, lease_token=request.lease_token)
         if not request.job_id or not request.lease_token:
             context.abort(
                 grpc.StatusCode.INVALID_ARGUMENT, "Job and lease token required"
@@ -66,7 +78,7 @@ class WorkerServicer(rpc.WorkerServiceServicer):
         return job
 
     def Claim(self, request, context):
-        self._authenticate(context)
+        self._authenticate(context, worker_id=request.worker_id)
         if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", request.worker_id):
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, "Invalid worker ID")
         if request.instance_id:
@@ -115,7 +127,7 @@ class WorkerServicer(rpc.WorkerServiceServicer):
         )
 
     def ReportAvailability(self, request, context):
-        self._authenticate(context)
+        self._authenticate(context, worker_id=request.worker_id)
         if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", request.worker_id):
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, "Invalid worker ID")
         try:
@@ -153,7 +165,7 @@ class WorkerServicer(rpc.WorkerServiceServicer):
             context.abort(grpc.StatusCode.FAILED_PRECONDITION, "Input is unavailable")
 
     def Heartbeat(self, request, context):
-        self._authenticate(context)
+        self._authenticate(context, lease_token=request.lease_token)
         if (
             not math.isfinite(request.progress_percent)
             or not 0 <= request.progress_percent <= 99
@@ -167,7 +179,7 @@ class WorkerServicer(rpc.WorkerServiceServicer):
         return pb.WorkerAck(accepted=accepted)
 
     def Complete(self, request, context):
-        self._authenticate(context)
+        self._authenticate(context, lease_token=request.lease_token)
         if request.ByteSize() > MAX_RESULT_BYTES:
             context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, "Result is too large")
         segments = []
@@ -200,7 +212,7 @@ class WorkerServicer(rpc.WorkerServiceServicer):
         return pb.WorkerAck(accepted=accepted)
 
     def Fail(self, request, context):
-        self._authenticate(context)
+        self._authenticate(context, lease_token=request.lease_token)
         if request.error_code not in {
             "invalid_input",
             "inference_failed",
@@ -216,21 +228,48 @@ class WorkerServicer(rpc.WorkerServiceServicer):
         return pb.WorkerAck(accepted=accepted)
 
 
-def start_worker_api(store: JobStore):
-    address = os.getenv("WORKER_GRPC_ADDR", "")
-    if not address:
-        return None
-    token = read_worker_token(os.getenv("WORKER_TOKEN_FILE", ""))
-    server = grpc.server(
-        futures.ThreadPoolExecutor(max_workers=8),
-        options=[
-            ("grpc.max_receive_message_length", MAX_RESULT_BYTES),
-            ("grpc.max_send_message_length", MAX_RESULT_BYTES),
-        ],
-    )
-    rpc.add_WorkerServiceServicer_to_server(WorkerServicer(store, token), server)
-    if not server.add_insecure_port(address):
-        raise ValueError("Cannot bind worker endpoint")
-    server.start()
-    logger.info("Authenticated worker endpoint started")
-    return server
+def start_worker_apis(store: JobStore):
+    """Public credentials never fall back to the legacy loopback token."""
+    listeners = []
+    legacy_address = os.getenv("WORKER_GRPC_ADDR", "")
+    if legacy_address:
+        listeners.append(
+            (
+                legacy_address,
+                WorkerCredentials.legacy(
+                    read_worker_token(os.getenv("WORKER_TOKEN_FILE", ""))
+                ),
+            )
+        )
+    public_address = os.getenv("WORKER_PUBLIC_GRPC_ADDR", "")
+    if public_address:
+        listeners.append(
+            (
+                public_address,
+                WorkerCredentials.from_file(os.getenv("WORKER_CREDENTIALS_FILE", "")),
+            )
+        )
+    servers = []
+    try:
+        for address, credentials in listeners:
+            server = grpc.server(
+                futures.ThreadPoolExecutor(max_workers=8),
+                maximum_concurrent_rpcs=32,
+                options=[
+                    ("grpc.max_receive_message_length", MAX_RESULT_BYTES),
+                    ("grpc.max_send_message_length", MAX_RESULT_BYTES),
+                ],
+            )
+            rpc.add_WorkerServiceServicer_to_server(
+                WorkerServicer(store, credentials), server
+            )
+            if not server.add_insecure_port(address):
+                raise ValueError("Cannot bind worker endpoint")
+            server.start()
+            servers.append(server)
+            logger.info("Authenticated worker endpoint started")
+        return servers
+    except Exception:
+        for server in servers:
+            server.stop(0)
+        raise

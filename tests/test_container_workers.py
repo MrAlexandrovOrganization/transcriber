@@ -63,7 +63,7 @@ class TunnelTests(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which("docker"), "Docker CLI required for Compose checks")
 class ComposeTests(unittest.TestCase):
-    def compose(self, profiles, autodeploy=False):
+    def compose(self, profiles, autodeploy=False, transport="tls"):
         with tempfile.TemporaryDirectory() as temp:
             env_file = Path(temp) / "synthetic.env"
             env_file.write_text(
@@ -72,7 +72,9 @@ class ComposeTests(unittest.TestCase):
                 "CPU_WORKER_ID=synthetic-cpu\nGPU_WORKER_ID=synthetic-gpu\n"
                 "CPU_MODEL=large-v3\nGPU_MODEL=large-v3-turbo\n"
                 "MODEL_CACHE_PATH=/synthetic/models\n"
-                "WORKER_TOKEN_PATH=/synthetic/token\n"
+                "CPU_WORKER_TOKEN_PATH=/synthetic/cpu.token\n"
+                "GPU_WORKER_TOKEN_PATH=/synthetic/gpu.token\n"
+                "REMOTE_WORKER_ENDPOINT=workers.example.com:443\n"
                 "SSH_HOST=synthetic.example\nSSH_USER=synthetic\n"
                 "SSH_IDENTITY_PATH=/synthetic/key\n"
                 "SSH_KNOWN_HOSTS_PATH=/synthetic/known_hosts\n"
@@ -107,6 +109,8 @@ class ComposeTests(unittest.TestCase):
                 "--format",
                 "json",
             ]
+            if transport == "ssh":
+                command[6:6] = ["-f", "compose.workers.ssh.yml"]
             if autodeploy:
                 command[6:6] = ["-f", "compose.workers.autodeploy.yml"]
             result = subprocess.run(
@@ -128,10 +132,15 @@ class ComposeTests(unittest.TestCase):
         ):
             with self.subTest(profiles=profiles):
                 services = self.compose(profiles)["services"]
-                self.assertEqual(set(services), workers | {"worker-tunnel"})
+                self.assertEqual(set(services), workers)
                 for worker in workers:
                     config = services[worker]
-                    self.assertEqual(config["network_mode"], "service:worker-tunnel")
+                    self.assertNotIn("network_mode", config)
+                    self.assertEqual(config["environment"]["REMOTE_WORKER_TLS"], "1")
+                    self.assertEqual(
+                        config["environment"]["REMOTE_WORKER_ENDPOINT"],
+                        "workers.example.com:443",
+                    )
                     self.assertNotIn("ports", config)
                     self.assertTrue(config["read_only"])
                     self.assertEqual(config["cap_drop"], ["ALL"])
@@ -172,6 +181,15 @@ class ComposeTests(unittest.TestCase):
             gpu["deploy"]["resources"]["reservations"]["devices"][0]["capabilities"],
             ["gpu"],
         )
+        self.assertNotEqual(cpu["volumes"][1]["source"], gpu["volumes"][1]["source"])
+
+    def test_ssh_is_an_explicit_legacy_overlay(self):
+        services = self.compose("cpu,gpu", transport="ssh")["services"]
+        self.assertEqual(set(services), {"worker-cpu", "worker-gpu", "worker-tunnel"})
+        for role in ("cpu", "gpu"):
+            worker = services["worker-" + role]
+            self.assertEqual(worker["network_mode"], "service:worker-tunnel")
+            self.assertEqual(worker["environment"]["REMOTE_WORKER_TLS"], "0")
         self.assertNotIn("ports", services["worker-tunnel"])
 
 

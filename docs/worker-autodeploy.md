@@ -32,7 +32,7 @@ credentials and local caches are excluded from published images.
 
 Requires Docker Compose >=2.24.4 (`!reset` support), Docker API >=1.45,
 Python 3 on the host for `make worker-release`, prepared local model cache,
-and the existing `.env` paths to token and SSH credentials.
+and the existing `.env` paths to separate worker token files.
 
 In each Mac/WSL `.env` enable:
 
@@ -44,8 +44,8 @@ WORKER_AUTODEPLOY=1
 
 Run `make up` once from the current checkout. It resolves the approved release
 into ignored `.worker-release.env`, pulls ready-made CPU/GPU images and builds
-only the small tunnel/updater bootstrap images. The SSH tunnel remains local
-because its user must match the machine's credential-file owner.
+only the small updater bootstrap image. Workers connect directly to Caddy over
+gRPC/TLS; no SSH container is required.
 
 Afterward normal worker-code releases need no command on the device.
 `make ps` shows the updater and workers; `make logs` includes update decisions.
@@ -55,7 +55,7 @@ an old `.worker-release.env` to downgrade an automatically updated worker.
 
 Profiles, worker IDs, models, cache paths and CPU/RAM limits remain local `.env`
 configuration and are copied to replacements unchanged. Editing these settings
-requires `make up` on that device. Tunnel/updater code, Compose topology and
+requires `make up` on that device. Transport/updater code, Compose topology and
 protocol changes require updating the bootstrap checkout and `make up` as well;
 this first version automatically replaces **CPU/GPU inference containers**.
 For an updater-only bootstrap change, `make up-updater` rebuilds/restarts only

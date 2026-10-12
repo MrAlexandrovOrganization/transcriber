@@ -45,11 +45,13 @@ jobs:
       - name: Stop isolated test database
         if: always()
         run: make test-db-down
+      - name: Verify real Caddy TLS and scoped worker RPCs
+        run: make test-worker-tls-docker
       - name: Verify real Docker update and rollback
         run: make test-updater-docker
       - name: Build images
         run: make build
-      - name: Build CPU, CUDA and tunnel images without production credentials
+      - name: Build CPU and CUDA images without production credentials
         run: make build-workers
 
   deploy:

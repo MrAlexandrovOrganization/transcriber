@@ -31,6 +31,8 @@ def main():
     docker = Docker()
     # Smoke images are deliberately local; all other calls use the real API.
     docker.pull = lambda image: docker.call("GET", "/images/" + image + "/json")
+    shared = os.getenv("SMOKE_NETWORK") == "shared"
+    network = None
     names = [project + ":" + version for version in ("old", "new", "bad")]
     try:
         with tempfile.TemporaryDirectory() as temp:
@@ -51,6 +53,11 @@ def main():
                     'COPY worker.py /worker.py\nCMD ["python", "/worker.py"]\n'
                 )
                 subprocess.run(["docker", "build", "-q", "-t", tag, temp], check=True)
+            network = docker.call(
+                "POST",
+                "/networks/create",
+                {"Name": project, "Labels": {"com.docker.compose.project": project}},
+            )["Id"]
             tunnel = docker.call(
                 "POST",
                 "/containers/create?name=" + project + "-tunnel",
@@ -85,7 +92,9 @@ def main():
                         "Retries": 1,
                     },
                     "HostConfig": {
-                        "NetworkMode": "container:" + tunnel["Id"],
+                        "NetworkMode": "container:" + tunnel["Id"]
+                        if shared
+                        else project,
                         "ReadonlyRootfs": True,
                         "Tmpfs": {"/tmp": "size=16777216,mode=1777"},
                         "Memory": 128 * 1024 * 1024,
@@ -111,6 +120,7 @@ def main():
                 and good["State"]["Health"]["Status"] == "healthy"
             )
             assert good["Config"]["Labels"]["smoke.version"] == "new"
+            assert good["HostConfig"]["NetworkMode"] == old["HostConfig"]["NetworkMode"]
             updater.health_timeout = 3
             updater.update(good, names[2])
             restored = docker.inspect(project)
@@ -122,6 +132,7 @@ def main():
                 json.dumps(
                     {
                         "project": project,
+                        "network": "shared" if shared else "bridge",
                         "healthy_replacement": True,
                         "unhealthy_rollback": True,
                     }
@@ -133,6 +144,8 @@ def main():
         ).splitlines()
         for ident in items:
             docker.remove(ident)
+        if network:
+            docker.call("DELETE", "/networks/" + network)
         for image in names:
             subprocess.run(
                 ["docker", "image", "rm", image],

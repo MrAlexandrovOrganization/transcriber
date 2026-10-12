@@ -28,7 +28,7 @@ from whisper.storage import (
     UploadReservation,
 )
 from whisper.telemetry import context_from_carrier, current_trace_carrier
-from whisper.worker_api import start_worker_api
+from whisper.worker_api import start_worker_apis
 
 logger = logging.getLogger(__name__)
 
@@ -408,14 +408,14 @@ def run_ingress() -> None:
     )
     if not server.add_insecure_port(f"{os.getenv('GRPC_BIND_HOST', '[::]')}:{port}"):
         raise ValueError("Cannot bind transcription endpoint")
-    worker_server = start_worker_api(store)
+    worker_servers = start_worker_apis(store)
     threading.Thread(
         target=CleanupWorker(store).run_forever, daemon=True, name="cleanup-worker"
     ).start()
     server.start()
 
     def stop_servers(*_):
-        if worker_server is not None:
+        for worker_server in worker_servers:
             worker_server.stop(5)
         server.stop(5)
 

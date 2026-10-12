@@ -7,6 +7,8 @@ WORKER_REGISTRY ?= ghcr.io/mralexandrovorganization/transcriber
 export WORKER_REGISTRY
 WORKER_RELEASE_FILE ?= .worker-release.env
 WORKER_RELEASE_ENV = $(if $(wildcard $(WORKER_RELEASE_FILE)),--env-file "$(WORKER_RELEASE_FILE)")
+WORKER_TRANSPORT ?= $(or $(shell sed -n 's/^WORKER_TRANSPORT=//p' $(ENV_FILE) 2>/dev/null),tls)
+WORKER_TLS_ENABLED ?= $(shell sed -n 's/^WORKER_TLS_ENABLED=//p' $(ENV_FILE) 2>/dev/null)
 WORKER_API_ENABLED ?= $(shell sed -n 's/^WORKER_API_ENABLED=//p' $(ENV_FILE) 2>/dev/null)
 ifneq ($(filter-out server workers,$(strip $(TRANSCRIBER_ROLE))),)
 $(error TRANSCRIBER_ROLE must be an unquoted server or workers)
@@ -14,9 +16,18 @@ endif
 ifneq ($(filter-out 0 1,$(strip $(WORKER_API_ENABLED))),)
 $(error WORKER_API_ENABLED must be an unquoted 0 or 1)
 endif
+ifneq ($(filter-out tls ssh,$(strip $(WORKER_TRANSPORT))),)
+$(error WORKER_TRANSPORT must be an unquoted tls or ssh)
+endif
+ifneq ($(filter-out 0 1,$(strip $(WORKER_TLS_ENABLED))),)
+$(error WORKER_TLS_ENABLED must be an unquoted 0 or 1)
+endif
 COMPOSE_FILES = -f docker-compose.yml
 ifeq ($(strip $(TRANSCRIBER_ROLE)),workers)
 COMPOSE_FILES = -f compose.workers.yml
+ifeq ($(strip $(WORKER_TRANSPORT)),ssh)
+COMPOSE_FILES += -f compose.workers.ssh.yml
+endif
 ifeq ($(strip $(WORKER_AUTODEPLOY)),1)
 COMPOSE_FILES += -f compose.workers.autodeploy.yml
 else
@@ -25,6 +36,9 @@ endif
 else
 ifeq ($(strip $(WORKER_API_ENABLED)),1)
 COMPOSE_FILES += -f compose.worker-api.yml
+endif
+ifeq ($(strip $(WORKER_TLS_ENABLED)),1)
+COMPOSE_FILES += -f compose.worker-tls.yml
 endif
 endif
 DOCKER_COMPOSE = docker compose $(WORKER_RELEASE_ENV) $(if $(wildcard $(ENV_FILE)),--env-file "$(ENV_FILE)") $(COMPOSE_FILES)
@@ -164,7 +178,7 @@ test-db-down:
 config-check:
 	$(DOCKER_COMPOSE) config --quiet
 ifeq ($(strip $(TRANSCRIBER_ROLE)),workers)
-	@$(DOCKER_COMPOSE) config --services | grep -Eq '^worker-(cpu|gpu)$$' || (echo 'Enable cpu and/or gpu in COMPOSE_PROFILES'; exit 1)
+	$(DOCKER_COMPOSE) config --format json | python3 scripts/validate_workers.py
 endif
 
 worker-api-config-check:
@@ -176,7 +190,7 @@ up-worker-api: worker-api-config-check
 config-check-examples:
 	$(MAKE) ENV_FILE=.env.mac.example TRANSCRIBER_ROLE=workers config-check
 	$(MAKE) ENV_FILE=.env.wsl.example TRANSCRIBER_ROLE=workers config-check
-	$(MAKE) ENV_FILE=.env.server.example TRANSCRIBER_ROLE=server WORKER_API_ENABLED=1 config-check
+	$(MAKE) ENV_FILE=.env.server.example TRANSCRIBER_ROLE=server WORKER_API_ENABLED=0 WORKER_TLS_ENABLED=1 config-check
 
 check: proto-gen proto-check config-check config-check-examples
 	poetry run ruff check whisper tests scripts
@@ -218,6 +232,7 @@ promote-workers:
 
 test-updater-docker:
 	python3 scripts/smoke_updater.py
+	SMOKE_NETWORK=shared python3 scripts/smoke_updater.py
 
 .PHONY: test-updater-docker
 
@@ -227,3 +242,13 @@ up-updater: config-check
 	$(DOCKER_COMPOSE) up -d --build --no-deps --wait --wait-timeout 180 worker-updater
 
 .PHONY: up-updater
+
+# Real TLS/HTTP2 proxy check; synthetic data, no production queue or credentials.
+test-worker-tls-docker:
+	poetry run python -m scripts.smoke_worker_tls
+
+restart-worker-api:
+	@test '$(TRANSCRIBER_ROLE)' = server || (echo 'Requires server role'; exit 1)
+	$(DOCKER_COMPOSE) up -d --no-deps --force-recreate --wait --wait-timeout 240 whisper-ingress
+
+.PHONY: test-worker-tls-docker restart-worker-api

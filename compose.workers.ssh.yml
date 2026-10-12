@@ -1,0 +1,53 @@
+# Explicit legacy migration/rollback transport. Normal deployments use TLS.
+services:
+  worker-cpu:
+    network_mode: service:worker-tunnel
+    depends_on:
+      worker-tunnel: {condition: service_healthy, restart: true}
+    environment: {REMOTE_WORKER_TLS: "0"}
+  worker-gpu:
+    network_mode: service:worker-tunnel
+    depends_on:
+      worker-tunnel: {condition: service_healthy, restart: true}
+    environment: {REMOTE_WORKER_TLS: "0"}
+  worker-tunnel:
+    restart: unless-stopped
+    build:
+      context: .
+      dockerfile: whisper/Dockerfile
+      target: tunnel
+      args:
+        PYTHON_VERSION: ${PYTHON_VERSION:?Run via make}
+        TUNNEL_UID: ${WORKER_UID:-1000}
+        TUNNEL_GID: ${WORKER_GID:-1000}
+    environment:
+      SSH_HOST: ${SSH_HOST:?Set SSH_HOST}
+      SSH_USER: ${SSH_USER:?Set SSH_USER}
+      SSH_PORT: ${SSH_PORT:-22}
+    volumes:
+      - type: bind
+        source: ${SSH_IDENTITY_PATH:?Set SSH_IDENTITY_PATH}
+        target: /run/credentials/identity
+        read_only: true
+        bind: {create_host_path: false, propagation: rprivate}
+      - type: bind
+        source: ${SSH_KNOWN_HOSTS_PATH:?Set SSH_KNOWN_HOSTS_PATH}
+        target: /run/credentials/known_hosts
+        read_only: true
+        bind: {create_host_path: false, propagation: rprivate}
+    mem_limit: 128m
+    cpus: 0.25
+    pids_limit: 32
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp]
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options: {max-size: 5m, max-file: "4"}
+    healthcheck:
+      test: [CMD, python, -c, "import socket; socket.create_connection(('127.0.0.1',50055),timeout=2).close()"]
+      interval: 10s
+      timeout: 3s
+      retries: 3

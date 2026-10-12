@@ -2,21 +2,23 @@
 
 The application and checkout are the same on every machine. The ignored `.env`
 selects the role, worker profiles, models, credentials and resource limits.
-There is no native transcription process or SSH tunnel in the normal container
-installation: `make ps` and `make logs` show both workers and their SSH sidecar.
+Workers connect directly to Caddy with gRPC/TLS; no SSH sidecar or native
+transcription process is required. `make ps` and `make logs` show workers and
+the optional autodeploy controller.
 Docker Engine/Colima/Docker Desktop still needs to be running.
 
 ## Choose a machine configuration
 
 | Machine | Example | Role | Profiles | Processes |
 | --- | --- | --- | --- | --- |
-| Mac | `.env.mac.example` | `workers` | `cpu` | One CPU worker and an SSH tunnel container |
-| WSL | `.env.wsl.example` | `workers` | `cpu,gpu` | Independent CPU and CUDA workers and one SSH tunnel container |
+| Mac | `.env.mac.example` | `workers` | `cpu` | One CPU worker |
+| WSL | `.env.wsl.example` | `workers` | `cpu,gpu` | Independent CPU and CUDA workers |
 | Server | `.env.server.example` | `server` | unset | Existing PostgreSQL, ingress and fallback worker |
 
 Copy the relevant example to `.env` once, then edit its machine-specific values.
 Do not overwrite an existing `.env`. `TRANSCRIBER_ROLE=server|workers` and the
-server's `WORKER_API_ENABLED=0|1` must be unquoted assignments at the beginning of
+server's `WORKER_TLS_ENABLED=0|1` / `WORKER_API_ENABLED=0|1` and
+`WORKER_TRANSPORT=tls|ssh` must be unquoted assignments at the beginning of
 their lines. Make reads only these selectors, never sources the file as shell
 code. Compose reads the remaining values. `ENV_FILE=/path/to/file` can select an
 alternative file explicitly. Environment/Make overrides take precedence.
@@ -39,6 +41,10 @@ GPU_COMPUTE_TYPE=int8_float16
 GPU_THREADS=2
 GPU_CPU_LIMIT=1.5
 GPU_MEMORY_LIMIT=3g
+WORKER_TRANSPORT=tls
+REMOTE_WORKER_ENDPOINT=workers.example.com:443
+CPU_WORKER_TOKEN_PATH=/home/your-login/.config/transcriber/cpu.token
+GPU_WORKER_TOKEN_PATH=/home/your-login/.config/transcriber/gpu.token
 ```
 
 `COMPOSE_PROFILES=cpu`, `gpu`, or `cpu,gpu` selects the worker containers.
@@ -67,31 +73,32 @@ does not currently route jobs by model or guarantee equal recognition quality.
   Docker Desktop WSL integration, or Docker Engine with NVIDIA Container Toolkit.
   A native `nvidia-smi` check alone does not validate container GPU access.
 - `WORKER_UID` and `WORKER_GID` match the host user (`id -u`, `id -g`). They
-  allow non-root workers and the SSH sidecar to read protected bind mounts.
+  allow non-root workers to read their protected model/token mounts.
 - `MODEL_CACHE_PATH` points to the Hugging Face cache root, e.g.
   `/home/your-login/.cache/huggingface`, containing `hub/models--...`. It is
   mounted read-only at `/models`. Workers use offline mode and do not download.
   Prepare each selected model beforehand, with its `refs/main`, or set the
   model variable to its snapshot directory inside `/models/hub/.../snapshots/SHA`.
-- `WORKER_TOKEN_PATH` is a protected bearer-token file matching the coordinator.
-- `SSH_IDENTITY_PATH` is a protected SSH key; prefer a dedicated key restricted
-  to forwarding `127.0.0.1:50055` on the coordinator.
-- `SSH_KNOWN_HOSTS_PATH` contains the server host key verified through an
-  already trusted channel. The sidecar requires strict host-key checking.
-- `SSH_HOST`, `SSH_USER`, `SSH_PORT` choose the actual SSH endpoint. The
-  sidecar deliberately does not depend on the host's SSH alias/config/agent.
+- `CPU_WORKER_TOKEN_PATH` and `GPU_WORKER_TOKEN_PATH` select separate protected
+  bearer-token files for enabled roles. Their hashes map to exact worker IDs in
+  the coordinator's private credential registry. Disabled roles need no token.
+- `REMOTE_WORKER_ENDPOINT` is the Caddy worker hostname and port (normally 443).
+  TLS and certificate/hostname verification are enabled in normal Compose mode.
+  Each worker uses its own ordinary Docker network namespace, with outbound
+  connectivity and no published ports. Credentials never grant SSH access.
 
 Use absolute host paths. Private files remain outside Git, owned by the selected
 UID and mode `0600`, with protected parent directories. `.env` stores paths,
 not key/token contents. Missing bind sources fail rather than becoming empty
 directories. Bind propagation is explicitly `rprivate`, including for credential
 files, for compatibility with the tested Docker Desktop WSL integration.
-The tunnel forwards only inside its container network namespace; workers share
-that namespace and use `127.0.0.1:50055`. No worker API port is
-published on the device and no insecure remote gRPC exception is needed.
+See [TLS and per-worker credentials](worker-tls.md) for provisioning, rotation,
+revocation and migration. The explicit `WORKER_TRANSPORT=ssh` compatibility
+overlay is for migration/rollback only, and requires the old SSH paths plus
+`REMOTE_WORKER_ENDPOINT=127.0.0.1:50055`. It is not used on migrated devices.
 
 CPU and CUDA targets share the same Python application and Poetry lockfile.
-The CUDA target adds cuBLAS/cuDNN wheels pinned only in `versions.mk`. The SSH
+The CUDA target adds cuBLAS/cuDNN wheels pinned only in `versions.mk`. The legacy SSH
 target contains OpenSSH and the small forwarding entry point. Containers are
 non-root with dropped capabilities, read-only root filesystems and bounded
 temporary storage/logs. Model cache is persistent and read-only; temporary audio
@@ -108,7 +115,8 @@ make restart
 make down
 ```
 
-`make up` builds the selected images and recreates containers as needed. Repeating
+`make up` builds local images or resolves approved images in autodeploy mode,
+and recreates containers as needed. Repeating
 it is safe. `make down` stops the selected project including disabled worker
 profiles, without deleting model caches or server volumes. Worker examples use
 `COMPOSE_PROJECT_NAME=transcriber-workers`, separate from an existing local
@@ -122,8 +130,8 @@ Docker status `running` means the process is alive. A worker becomes `healthy`
 after loading its model and successfully registering with the coordinator.
 Availability reports refresh an atomic local readiness timestamp; the healthcheck
 requires a successful report within 45 seconds. Failed reports/shutdown remove
-it. Readiness remains valid while inference is busy. The tunnel healthcheck
-only checks its local listener; worker readiness checks the full gRPC connection.
+it. Readiness remains valid while inference is busy. Worker readiness checks the
+full gRPC connection through Caddy.
 An unhealthy container is not automatically restarted by Docker's restart policy;
 the worker already retries coordinator connectivity. Registry TTL is 90 seconds.
 
@@ -135,8 +143,9 @@ an asleep/offline device processing. See [priority and leases](worker-priority.m
 ## Server configuration and CI
 
 The existing server role is selected by default for backward compatibility.
-`WORKER_API_ENABLED=1` keeps the loopback worker API overlay enabled on normal
-`make up`. `SERVER_WORKER_MODEL`, `SERVER_WORKER_COMPUTE_TYPE`,
+`WORKER_TLS_ENABLED=1` enables the Caddy network and scoped Worker API.
+`WORKER_API_ENABLED=1` additionally enables the legacy loopback listener only
+during migration; normal TLS deployments set it to zero. `SERVER_WORKER_MODEL`, `SERVER_WORKER_COMPUTE_TYPE`,
 `SERVER_WORKER_CPU_THREADS`, `SERVER_WORKER_CPU_LIMIT` and
 `SERVER_WORKER_MEMORY_LIMIT` configure fallback inference independently.
 Existing volumes and network aliases are preserved.

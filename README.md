@@ -135,62 +135,29 @@ result, and cleans up its processes/container. It requires a cached `base`
 Whisper model and forbids model downloads. It never connects to Telegram or
 an existing queue/database. Missing model/image is a failed prerequisite.
 
-For a remote deployment, provision a random 32–512 character ASCII bearer token
-in a protected file on the ingress and worker, outside Git. `make up-worker-api
-WORKER_TOKEN_PATH=/protected/token` explicitly enables `compose.worker-api.yml`:
-only the worker API is published on host loopback port 50055. The client-facing
-API and database are not exposed.
+## Remote workers over TLS
 
-To preserve this opt-in across normal CI deployment (`make up`), put these
-non-secret settings in the server checkout's ignored `.env`:
+Normal container workers connect directly to Caddy over gRPC/HTTP2 with TLS.
+Set `REMOTE_WORKER_ENDPOINT=workers.example.com:443`, `WORKER_TRANSPORT=tls`
+and a separate protected `CPU_WORKER_TOKEN_PATH`/`GPU_WORKER_TOKEN_PATH` for
+each enabled role. No SSH key, tunnel or inbound laptop port is required.
 
-```dotenv
-WORKER_API_ENABLED=1
-WORKER_TOKEN_PATH=/home/maxim/.config/transcriber/worker.token
-```
+On the coordinator, `WORKER_TLS_ENABLED=1` enables `compose.worker-tls.yml` and
+`WORKER_CREDENTIALS_PATH` selects a private JSON registry of SHA-256 token hashes
+bound to exact worker IDs. Caddy reaches the worker-only listener on the
+external internal Docker network `caddy-transcriber-net`; no worker port is
+published. The client-facing API stays private. Start Caddy's network first.
 
-The enable flag must be an unquoted `0` or `1`. Make reads only that flag;
-Compose reads the token file path. Token contents remain exclusively in the
-protected file. `make up`, `build`, `down`, `logs` and `restart` then consistently
-select the worker API overlay. `make config-check` validates the selected
-configuration without printing secrets. Unset/zero keeps the default stack.
-After disabling the flag, run `make up` to remove the published listener from
-the recreated ingress. The one-time `make up-worker-api` alias does not persist
-the setting; use the ignored `.env` for subsequent deployments.
+See [TLS provisioning and rollout](docs/worker-tls.md),
+[per-machine Compose](docs/container-workers.md), and
+[automatic image delivery](docs/worker-autodeploy.md).
+The optional `WORKER_API_ENABLED=1` overlay and explicit SSH transport remain
+for legacy migration/rollback; turn the legacy listener off after migration.
+The public listener never accepts the legacy shared token.
 
-Forward the loopback listener with:
-
-```bash
-ssh -N -L 50055:127.0.0.1:50055 server
-```
-
-In another terminal on Mac/WSL:
-
-```bash
-REMOTE_WORKER_TOKEN_FILE=/protected/token \
-WHISPER_MODEL=base WHISPER_LOCAL_FILES_ONLY=1 \
-WHISPER_DEVICE=cpu WHISPER_COMPUTE_TYPE=int8 WHISPER_CPU_THREADS=2 \
-WORKER_POLL_INTERVAL_S=60 make run-remote-worker
-```
-
-Ctrl+C stops the worker; active inference is interrupted cooperatively and its
-lease eventually expires. Compose uses a 120-second job lease. Each
-process claims at most one job at a time. WSL CUDA uses the same worker with
-`WHISPER_DEVICE=cuda`; verify CUDA/cuBLAS/cuDNN and supported compute types first.
-Mac uses CPU in this pilot; Apple GPU requires a separate inference engine.
-No availability probe from the bot is needed: workers independently report
-readiness while idle or busy, then poll for work. See
-[Mac setup](docs/mac-worker.md) and [WSL setup](docs/wsl-worker.md).
-
-Worker transport rejects non-loopback plaintext unless explicitly allowed with
-`REMOTE_WORKER_ALLOW_INSECURE=1` for a trusted VPN. `REMOTE_WORKER_TLS=1` and
-optional `REMOTE_WORKER_TLS_CA_FILE` support an externally configured TLS proxy;
-the built-in listener itself is plaintext. Never publish it directly to the
-Internet. Remote workers accept at most 256 MiB of audio by default
-(`REMOTE_WORKER_MAX_INPUT_BYTES`); `MAX_AUDIO_BYTES` optionally limits total
-uploads on ingress. Existing ingress upload behavior is unchanged unless it is
-set. Serialized results are limited to 4 MiB. Only enable a remote pool for jobs
-compatible with its model and limits: capability-based routing is a later step.
+Remote workers accept at most 256 MiB of audio by default. Results are limited
+to 4 MiB. Existing model/preset behavior, durable queue and leases are unchanged;
+model-aware routing remains a separate future change.
 
 Production notes-bot now persists accepted voice jobs, results and delivery
 checkpoints in PostgreSQL and uses idempotent note appends. It can wait for absent

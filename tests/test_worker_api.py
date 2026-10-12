@@ -13,6 +13,7 @@ from unittest.mock import patch
 import grpc
 import psycopg
 from psycopg.conninfo import make_conninfo
+from test_worker_auth import CPU_TOKEN, GPU_TOKEN, registry
 
 from proto import whisper_pb2 as pb
 from proto import whisper_pb2_grpc as rpc
@@ -21,6 +22,7 @@ from whisper.remote_worker import Config, RemoteWorker
 from whisper.server import TranscriptionServicer, Worker
 from whisper.storage import JobStore
 from whisper.worker_api import WorkerServicer
+from whisper.worker_auth import WorkerCredentials
 
 TOKEN = "synthetic-test-token-with-32-characters"
 DSN = os.getenv("TRANSCRIBER_TEST_DATABASE_URL")
@@ -350,6 +352,122 @@ class WorkerAPITests(unittest.TestCase):
         self.assertTrue(self.rpc(self.stub.Complete, request).accepted)
         self.assertFalse(self.rpc(self.stub.Complete, request).accepted)
         self.assertEqual(self.store.get_job(job_id).text, "synthetic transcript")
+
+    def test_scoped_tokens_fence_worker_identity_and_all_lease_operations(self):
+        credentials = WorkerCredentials(registry()["workers"])
+        server = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
+        rpc.add_WorkerServiceServicer_to_server(
+            WorkerServicer(self.store, credentials), server
+        )
+        port = server.add_insecure_port("127.0.0.1:0")
+        server.start()
+        channel = grpc.insecure_channel(f"127.0.0.1:{port}")
+        stub = rpc.WorkerServiceStub(channel)
+        cpu_meta = (("authorization", "Bearer " + CPU_TOKEN),)
+        gpu_meta = (("authorization", "Bearer " + GPU_TOKEN),)
+        try:
+            self.submit()
+            instance = str(uuid.uuid4())
+            for method, request in (
+                (
+                    stub.ReportAvailability,
+                    pb.WorkerAvailabilityRequest(
+                        worker_id="wsl-gpu", instance_id=instance, ready=True
+                    ),
+                ),
+                (
+                    stub.Claim,
+                    pb.WorkerClaimRequest(worker_id="wsl-gpu", instance_id=instance),
+                ),
+            ):
+                with self.assertRaises(grpc.RpcError) as error:
+                    method(request, timeout=5, metadata=cpu_meta)
+                self.assertEqual(
+                    error.exception.code(), grpc.StatusCode.PERMISSION_DENIED
+                )
+            stub.ReportAvailability(
+                pb.WorkerAvailabilityRequest(
+                    worker_id="wsl-cpu", instance_id=instance, ready=True
+                ),
+                timeout=5,
+                metadata=cpu_meta,
+            )
+            claimed = stub.Claim(
+                pb.WorkerClaimRequest(worker_id="wsl-cpu", instance_id=instance),
+                timeout=5,
+                metadata=cpu_meta,
+            )
+            self.assertTrue(claimed.job_id)
+            for method, request in (
+                (
+                    stub.Download,
+                    pb.WorkerJobRequest(
+                        job_id=claimed.job_id, lease_token=claimed.lease_token
+                    ),
+                ),
+                (
+                    stub.Heartbeat,
+                    pb.WorkerHeartbeatRequest(
+                        job_id=claimed.job_id, lease_token=claimed.lease_token
+                    ),
+                ),
+                (
+                    stub.Complete,
+                    pb.WorkerCompleteRequest(
+                        job_id=claimed.job_id,
+                        lease_token=claimed.lease_token,
+                        text="wrong worker",
+                    ),
+                ),
+                (
+                    stub.Fail,
+                    pb.WorkerFailRequest(
+                        job_id=claimed.job_id,
+                        lease_token=claimed.lease_token,
+                        error_code="inference_failed",
+                    ),
+                ),
+            ):
+                with self.assertRaises(grpc.RpcError) as error:
+                    response = method(request, timeout=5, metadata=gpu_meta)
+                    if method == stub.Download:
+                        list(response)
+                self.assertEqual(
+                    error.exception.code(), grpc.StatusCode.PERMISSION_DENIED
+                )
+            self.assertTrue(
+                stub.Heartbeat(
+                    pb.WorkerHeartbeatRequest(
+                        job_id=claimed.job_id, lease_token=claimed.lease_token
+                    ),
+                    timeout=5,
+                    metadata=cpu_meta,
+                ).accepted
+            )
+            self.assertTrue(
+                stub.Complete(
+                    pb.WorkerCompleteRequest(
+                        job_id=claimed.job_id,
+                        lease_token=claimed.lease_token,
+                        text="correct worker",
+                    ),
+                    timeout=5,
+                    metadata=cpu_meta,
+                ).accepted
+            )
+            for metadata in (self.metadata, cpu_meta + cpu_meta):
+                with self.assertRaises(grpc.RpcError) as error:
+                    stub.Claim(
+                        pb.WorkerClaimRequest(worker_id="wsl-cpu"),
+                        timeout=5,
+                        metadata=metadata,
+                    )
+                self.assertEqual(
+                    error.exception.code(), grpc.StatusCode.UNAUTHENTICATED
+                )
+        finally:
+            channel.close()
+            server.stop(0).wait()
 
     def test_auth_and_worker_only_listener(self):
         job_id = self.submit()
