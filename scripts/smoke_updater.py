@@ -51,6 +51,17 @@ def main():
                     'COPY worker.py /worker.py\nCMD ["python", "/worker.py"]\n'
                 )
                 subprocess.run(["docker", "build", "-q", "-t", tag, temp], check=True)
+            tunnel = docker.call(
+                "POST",
+                "/containers/create?name=" + project + "-tunnel",
+                {
+                    "Image": names[0],
+                    "Cmd": ["python", "-c", "import time; time.sleep(600)"],
+                    "Labels": {"com.docker.compose.project": project},
+                    "HostConfig": {"Memory": 64 * 1024 * 1024, "CapDrop": ["ALL"]},
+                },
+            )
+            docker.action(tunnel["Id"], "start")
             created = docker.call(
                 "POST",
                 "/containers/create?name=" + project,
@@ -74,6 +85,7 @@ def main():
                         "Retries": 1,
                     },
                     "HostConfig": {
+                        "NetworkMode": "container:" + tunnel["Id"],
                         "ReadonlyRootfs": True,
                         "Tmpfs": {"/tmp": "size=16777216,mode=1777"},
                         "Memory": 128 * 1024 * 1024,

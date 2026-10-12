@@ -21,6 +21,8 @@ def container(ident="old", name="/workers-worker-cpu-1", healthy=True):
         "Image": "old-image",
         "Config": {
             "Image": "old-ref",
+            "Hostname": "derived-inspect-hostname",
+            "Domainname": "derived-domain",
             "Env": ["TOKEN_FILE=/secret"],
             "Labels": {
                 "com.docker.compose.project": "workers",
@@ -138,6 +140,8 @@ class ReleaseTests(unittest.TestCase):
         new = replacement(old, IMAGE, "new-image")
         self.assertEqual(new["Env"], old["Config"]["Env"])
         self.assertEqual(new["HostConfig"], old["HostConfig"])
+        self.assertNotIn("Hostname", new)
+        self.assertNotIn("Domainname", new)
         self.assertEqual(new["Labels"]["com.docker.compose.image"], "new-image")
         self.assertEqual(old, before)
 
@@ -211,6 +215,24 @@ class ReleaseTests(unittest.TestCase):
             self.assertIsNone(docker.inspect("old"))
             self.assertEqual(docker.inspect("new")["Config"]["Image"], IMAGE)
             self.assertNotIn("pending", updater.state)
+
+    def test_create_failure_recovers_immediately_without_waiting_for_next_poll(self):
+        with tempfile.TemporaryDirectory() as temp:
+            docker = FakeDocker(container())
+            updater = Updater(docker, "workers", REGISTRY, temp)
+            original = docker.call
+
+            def call(method, path, data=None):
+                if path.startswith("/containers/create"):
+                    raise APIError("Docker POST create failed: HTTP 400")
+                return original(method, path, data)
+
+            docker.call = call
+            with self.assertRaises(APIError):
+                updater.update(docker.inspect("old"), IMAGE)
+            self.assertTrue(docker.inspect("workers-worker-cpu-1")["State"]["Running"])
+            self.assertNotIn("pending", updater.state)
+            self.assertEqual(updater.state["failed"]["cpu"], IMAGE)
 
     def test_unchanged_image_and_failed_release_do_not_restart(self):
         with tempfile.TemporaryDirectory() as temp:

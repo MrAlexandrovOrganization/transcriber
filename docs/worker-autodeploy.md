@@ -58,6 +58,8 @@ configuration and are copied to replacements unchanged. Editing these settings
 requires `make up` on that device. Tunnel/updater code, Compose topology and
 protocol changes require updating the bootstrap checkout and `make up` as well;
 this first version automatically replaces **CPU/GPU inference containers**.
+For an updater-only bootstrap change, `make up-updater` rebuilds/restarts only
+that controller and preserves all running inference containers.
 The server's permanent worker is deployed by the existing VM workflow.
 
 ## Tasks, failures and recovery
@@ -74,7 +76,8 @@ if it is still busy, drain is cancelled (`SIGUSR2`) and the update retries later
 An updated worker must pass its normal model/coordinator readiness check within
 240 seconds. Otherwise its stopped predecessor is restored. The failed digest
 is quarantined for that worker until a different release arrives. The updater's
-named state volume contains an atomic recovery journal; an interrupted rollout
+named state volume contains an atomic recovery journal; ordinary API errors
+trigger immediate rollback, and an interrupted rollout
 is completed if the replacement is healthy, or rolled back on updater restart.
 Do not remove the updater state volume or rollback container during a rollout.
 Old image layers are retained for rollback; periodically inspect Docker disk

@@ -46,7 +46,20 @@ class Docker:
                 return None
             if response.status >= 300:
                 # Docker errors may include secret-bearing container configuration.
-                raise APIError(f"Docker {method} failed: HTTP {response.status}")
+                operation = path.split("?", 1)[0].rsplit("/", 1)[-1]
+                if operation not in (
+                    "create",
+                    "start",
+                    "stop",
+                    "rename",
+                    "kill",
+                    "exec",
+                    "json",
+                ):
+                    operation = "request"
+                raise APIError(
+                    f"Docker {method} {operation} failed: HTTP {response.status}"
+                )
             if stream:
                 while line := response.readline(1024 * 1024):
                     if len(line) >= 1024 * 1024:
@@ -142,6 +155,11 @@ def replacement(old, image, image_id, old_defaults=None, new_defaults=None):
     config["Labels"]["com.docker.compose.image"] = image_id
     host = dict(old["HostConfig"])
     host.pop("ConsoleSize", None)
+    if host.get("NetworkMode", "").startswith("container:"):
+        # Inspect fills these even when Compose did not explicitly set them.
+        # Docker rejects explicit hostname/domain options with a shared namespace.
+        config.pop("Hostname", None)
+        config.pop("Domainname", None)
     config["HostConfig"] = host
     return config
 
@@ -244,44 +262,56 @@ class Updater:
             "image": image,
         }
         self.save()
-        self.docker.action(ident, "kill", signal="SIGUSR1")
-        deadline = time.monotonic() + self.drain_timeout
-        while not self.docker.drained(ident):
-            if STOP.wait(2) or time.monotonic() >= deadline:
-                LOG.warning("Worker drain deferred: service=%s", role)
-                self.recover()
-                return
-        # Write a durable recovery record before the first destructive action.
-        self.state["pending"] = {
-            "old": ident,
-            "started": old["State"].get("StartedAt"),
-            "name": name,
-            "service": role,
-            "image": image,
-        }
-        self.save()
-        self.docker.action(ident, "stop", t=30)
-        self.docker.action(ident, "rename", name=name + "-rollback-" + ident[:12])
-        created = self.docker.call(
-            "POST",
-            "/containers/create?" + urlencode({"name": name}),
-            replacement(
-                old,
-                image,
-                target["Id"],
-                self.docker.call("GET", "/images/" + old["Image"] + "/json")["Config"],
-                target.get("Config") or {},
-            ),
-        )
-        self.docker.action(created["Id"], "start")
-        deadline = time.monotonic() + self.health_timeout
-        while not STOP.wait(2):
-            new = self.docker.inspect(created["Id"])
-            if new and new["State"].get("Health", {}).get("Status") == "healthy":
-                break
-            if not new or not new["State"]["Running"] or time.monotonic() >= deadline:
-                break
-        self.recover()
+        try:
+            self.docker.action(ident, "kill", signal="SIGUSR1")
+            deadline = time.monotonic() + self.drain_timeout
+            while not self.docker.drained(ident):
+                if STOP.wait(2) or time.monotonic() >= deadline:
+                    LOG.warning("Worker drain deferred: service=%s", role)
+                    self.recover()
+                    return
+            # Write a durable recovery record before the first destructive action.
+            self.state["pending"] = {
+                "old": ident,
+                "started": old["State"].get("StartedAt"),
+                "name": name,
+                "service": role,
+                "image": image,
+            }
+            self.save()
+            self.docker.action(ident, "stop", t=30)
+            self.docker.action(ident, "rename", name=name + "-rollback-" + ident[:12])
+            created = self.docker.call(
+                "POST",
+                "/containers/create?" + urlencode({"name": name}),
+                replacement(
+                    old,
+                    image,
+                    target["Id"],
+                    self.docker.call("GET", "/images/" + old["Image"] + "/json")[
+                        "Config"
+                    ],
+                    target.get("Config") or {},
+                ),
+            )
+            self.docker.action(created["Id"], "start")
+            deadline = time.monotonic() + self.health_timeout
+            while not STOP.wait(2):
+                new = self.docker.inspect(created["Id"])
+                if new and new["State"].get("Health", {}).get("Status") == "healthy":
+                    break
+                if (
+                    not new
+                    or not new["State"]["Running"]
+                    or time.monotonic() >= deadline
+                ):
+                    break
+            self.recover()
+        except Exception:
+            # Recover immediately on a normal API failure; the durable journal
+            # also handles process/power loss before this handler can run.
+            self.recover()
+            raise
 
     def reconcile(self):
         self.recover()
@@ -297,7 +327,7 @@ class Updater:
             old = self.docker.inspect(item["Id"])
             if old and old["State"]["Running"] and self.managed(old):
                 self.update(old, images[old["Config"]["Labels"][ROLE]])
-        LOG.info("Approved release reconciled: revision=%s", revision)
+        LOG.info("Approved release checked: revision=%s", revision)
 
 
 class JsonFormatter(logging.Formatter):
@@ -324,13 +354,22 @@ def main():
     updater = Updater(
         Docker(), os.environ["WORKER_PROJECT"], os.environ["WORKER_REGISTRY"], "/state"
     )
+
+    def heartbeat():
+        while not STOP.wait(15):
+            Path("/tmp/updater-alive").touch()
+
+    Path("/tmp/updater-alive").touch()
+    threading.Thread(target=heartbeat, daemon=True, name="updater-heartbeat").start()
     while not STOP.is_set():
         try:
             updater.reconcile()
         except Exception as error:
             # No exception message: Docker/RPC errors may contain sensitive values.
             LOG.warning(
-                "Release reconciliation deferred: error_type=%s", type(error).__name__
+                "Release reconciliation deferred: error_type=%s reason=%s",
+                type(error).__name__,
+                str(error) if isinstance(error, APIError) else "unavailable",
             )
         Path("/tmp/updater-alive").touch()
         STOP.wait(60)

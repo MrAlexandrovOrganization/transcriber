@@ -220,3 +220,10 @@ test-updater-docker:
 	python3 scripts/smoke_updater.py
 
 .PHONY: test-updater-docker
+
+# Update only the bootstrap controller, preserving running inference containers.
+up-updater: config-check
+	@test '$(TRANSCRIBER_ROLE):$(WORKER_AUTODEPLOY)' = workers:1 || (echo 'Requires WORKER_AUTODEPLOY=1 in worker mode'; exit 1)
+	$(DOCKER_COMPOSE) up -d --build --no-deps --wait --wait-timeout 180 worker-updater
+
+.PHONY: up-updater
