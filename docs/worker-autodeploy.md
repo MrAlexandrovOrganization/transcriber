@@ -7,6 +7,8 @@ Push to `main` starts `.github/workflows/ci.yaml`:
 1. `make check`, isolated PostgreSQL/RPC integration tests and image builds.
 2. Native amd64 and arm64 runners call `make publish-workers`. CPU supports
    both architectures; CUDA supports amd64. Images carry the tested Git SHA.
+   Registry build-cache tags reuse dependency/CUDA layers across CI runners;
+   revision labels are applied on export without invalidating those layers.
 3. The VM deploys that exact SHA with a clean working copy and `make deploy`;
    ingress/PostgreSQL must become healthy. Deployment never fetches an untested
    newer `main` through a plain `git pull`.

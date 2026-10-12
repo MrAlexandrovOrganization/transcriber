@@ -1,12 +1,13 @@
 """Release validation and crash recovery use synthetic Docker state only."""
 
 import copy
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.worker_release import LABEL, atomic_json, release
+from scripts.worker_release import LABEL, atomic_json, publish, release
 from scripts.worker_updater import OPT_IN, ROLE, APIError, Updater, replacement
 
 REGISTRY = "ghcr.io/example/transcriber"
@@ -87,6 +88,35 @@ class FakeDocker:
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_publisher_reuses_dependency_cache_and_labels_exported_revision(self):
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    key: "synthetic"
+                    for key in (
+                        "PYTHON_VERSION",
+                        "POETRY_VERSION",
+                        "GRPCIO_TOOLS_VERSION",
+                        "CUDNN_VERSION",
+                        "CUBLAS_VERSION",
+                    )
+                },
+            ),
+            patch("scripts.worker_release.run") as run,
+        ):
+            publish(REGISTRY, "f" * 40, "amd64")
+        self.assertEqual(len(run.call_args_list), 2)
+        for call, role in zip(run.call_args_list, ("cpu", "gpu"), strict=True):
+            self.assertIn("org.opencontainers.image.revision=" + "f" * 40, call.args)
+            self.assertIn(
+                f"type=registry,ref={REGISTRY}-worker-{role}:buildcache-amd64,mode=max",
+                call.args,
+            )
+            self.assertFalse(
+                any(str(arg).startswith("SOURCE_REVISION=") for arg in call.args)
+            )
+
     def test_only_expected_registry_digest_and_revision_are_accepted(self):
         labels = {
             LABEL + "revision": "f" * 40,

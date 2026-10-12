@@ -39,9 +39,8 @@ COPY --from=proto-builder /proto-build/proto/ ./proto/
 CMD ["python", "-m", "whisper.main"]
 
 FROM runtime AS remote-cpu
-ARG SOURCE_REVISION=development
 LABEL org.opencontainers.image.source="https://github.com/MrAlexandrovOrganization/transcriber" \
-      org.opencontainers.image.revision=${SOURCE_REVISION} \
+      org.opencontainers.image.revision="development" \
       io.transcriber.drain-protocol="1"
 ENV PYTHONUNBUFFERED=1
 USER 1000:1000

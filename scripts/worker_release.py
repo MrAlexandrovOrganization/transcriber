@@ -86,7 +86,8 @@ def publish(registry, revision, arch):
         "CUBLAS_VERSION",
     ):
         args += ["--build-arg", key + "=" + os.environ[key]]
-    args += ["--build-arg", "SOURCE_REVISION=" + revision]
+    # Export-time metadata must not invalidate cached CUDA dependency layers.
+    args += ["--label", "org.opencontainers.image.revision=" + revision]
     for role in ("cpu", "gpu") if arch == "amd64" else ("cpu",):
         run(
             "docker",
@@ -101,6 +102,10 @@ def publish(registry, revision, arch):
             "--tag",
             f"{registry}-worker-{role}:sha-{revision}-{arch}",
             "--push",
+            "--cache-from",
+            f"type=registry,ref={registry}-worker-{role}:buildcache-{arch}",
+            "--cache-to",
+            f"type=registry,ref={registry}-worker-{role}:buildcache-{arch},mode=max",
             *args,
             ".",
         )

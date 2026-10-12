@@ -145,10 +145,11 @@ CI invokes `make check`, isolated PostgreSQL integration tests, `make build` and
 `make build-workers`. Worker builds use synthetic example paths and do not load
 models, connect to production or require a GPU. A CUDA image build does not
 confirm CUDA inference; validate that on the target WSL runtime separately.
-The deployment job continues to call `make up` on the configured VM after Git
-update. Each target's ignored `.env` controls what that same command starts.
-CI does not yet deploy to sleeping personal devices or publish images to a
-registry. Those delivery policies can be added independently of this interface.
+The deployment job deploys the exact checked SHA with `make deploy` on the VM.
+Each target's ignored `.env` controls what the standard commands start.
+With `WORKER_AUTODEPLOY=1`, Mac/WSL inference containers follow approved public
+GHCR releases through a local updater container, including after being offline.
+See [automatic deployment, drain and rollback](worker-autodeploy.md).
 
 ## Migrate an existing native worker
 
