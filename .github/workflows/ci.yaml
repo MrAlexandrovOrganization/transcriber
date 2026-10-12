@@ -6,6 +6,14 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
+# Serialize releases: a delayed old run must never overwrite the stable marker.
+concurrency:
+  group: transcriber-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   check:
     name: Checks
@@ -36,6 +44,8 @@ jobs:
       - name: Stop isolated test database
         if: always()
         run: make test-db-down
+      - name: Verify real Docker update and rollback
+        run: make test-updater-docker
       - name: Build images
         run: make build
       - name: Build CPU, CUDA and tunnel images without production credentials
@@ -55,6 +65,64 @@ jobs:
           username: ${{ secrets.VM_USER }}
           key: ${{ secrets.VM_SSH_KEY }}
           script: |
+            set -eu
             cd ${{ secrets.VM_PROJECT_PATH }}
-            git pull
-            make up
+            test -z "$(git status --porcelain)"
+            git fetch origin ${{ github.sha }}
+            git merge --ff-only ${{ github.sha }}
+            test "$(git rev-parse HEAD)" = '${{ github.sha }}'
+            make deploy
+
+  publish:
+    name: Publish ${{ matrix.arch }} worker images
+    needs: check
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - id: versions
+        run: make ci-versions >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+        with:
+          version: ${{ steps.versions.outputs.buildx }}
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - run: make publish-workers PUBLISH_ARCH=${{ matrix.arch }}
+        env:
+          SOURCE_REVISION: ${{ github.sha }}
+
+  release:
+    name: Approve worker release
+    needs: [deploy, publish]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - id: versions
+        run: make ci-versions >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+        with:
+          version: ${{ steps.versions.outputs.buildx }}
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - run: make promote-workers
+        env:
+          SOURCE_REVISION: ${{ github.sha }}

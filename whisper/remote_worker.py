@@ -31,6 +31,7 @@ from whisper.telemetry import context_from_carrier, init_telemetry
 from whisper.worker_health import report as report_health
 
 logger = logging.getLogger(__name__)
+DRAIN_FILE = Path("/tmp/worker-drained")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -151,6 +152,8 @@ class RemoteWorker:
         self.stop = stop if stop is not None else threading.Event()
         self.instance_id = str(uuid.uuid4())
         self._available = threading.Event()
+        self.drain = threading.Event()
+        self._drained = threading.Event()
         self._metadata = (("authorization", "Bearer " + token),)
 
     def _call(self, method, request):
@@ -162,6 +165,24 @@ class RemoteWorker:
         try:
             while not self.stop.is_set():
                 try:
+                    if self.drain.is_set():
+                        # The synchronous process() has completed, including Complete/Fail.
+                        # Serialize withdrawal with the reporter before acknowledging drain.
+                        self._drained.set()
+                        self._available.clear()
+                        try:
+                            self._report_availability(False)
+                        except Exception:
+                            report_health(self.config.health_file, False)
+                        DRAIN_FILE.touch()
+                        while self.drain.is_set() and not self.stop.wait(0.25):
+                            pass
+                        DRAIN_FILE.unlink(missing_ok=True)
+                        self._drained.clear()
+                        if self.stop.is_set():
+                            break
+                        self._report_availability(True)
+                        self._available.set()
                     if reporter is None:
                         interval = self._report_availability(True)
                         self._available.set()
@@ -180,6 +201,8 @@ class RemoteWorker:
                         continue
                     if self.stop.is_set():
                         break
+                    if self.drain.is_set():
+                        continue
                     claim = self._call(
                         self.stub.Claim,
                         pb.WorkerClaimRequest(
@@ -231,7 +254,13 @@ class RemoteWorker:
     def _report_availability_loop(self, interval):
         while not self.stop.wait(interval):
             try:
+                if self._drained.is_set():
+                    continue
                 interval = self._report_availability(True)
+                if self._drained.is_set():
+                    # A concurrent drain may have withdrawn during this RPC.
+                    self._report_availability(False)
+                    continue
                 self._available.set()
             except Exception:
                 self._available.clear()
@@ -384,8 +413,12 @@ def main():
         signal.signal(sig, lambda *_: stop.set())
     try:
         config = Config.from_env()
+        DRAIN_FILE.unlink(missing_ok=True)
         report_health(config.health_file, False)
         token = read_token(config.token_file)
+        drain = threading.Event()
+        signal.signal(signal.SIGUSR1, lambda *_: drain.set())
+        signal.signal(signal.SIGUSR2, lambda *_: drain.clear())
         # Load dependencies and model before leasing any task.
         engine = FasterWhisperEngine()
         logger.info("Remote worker ready: worker=%s", config.worker_id)
@@ -394,6 +427,7 @@ def main():
             worker = RemoteWorker(
                 config, rpc.WorkerServiceStub(channel), engine, token, stop
             )
+            worker.drain = drain
             thread = threading.Thread(
                 target=worker.run_forever, daemon=True, name="remote-worker"
             )

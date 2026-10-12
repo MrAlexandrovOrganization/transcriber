@@ -1,0 +1,50 @@
+# Compose >=2.24.4. The .env remains the authority for profiles/models/limits.
+services:
+  worker-cpu:
+    build: !reset null
+    image: ${WORKER_CPU_IMAGE:?Run make worker-release first}
+    labels:
+      io.transcriber.autodeploy: "true"
+      io.transcriber.worker-role: cpu
+  worker-gpu:
+    build: !reset null
+    image: ${WORKER_GPU_IMAGE:?Run make worker-release first}
+    labels:
+      io.transcriber.autodeploy: "true"
+      io.transcriber.worker-role: gpu
+  worker-updater:
+    build:
+      context: .
+      dockerfile: whisper/Dockerfile
+      target: updater
+      args:
+        PYTHON_VERSION: ${PYTHON_VERSION:?Run via make}
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      WORKER_PROJECT: ${COMPOSE_PROJECT_NAME:?Set COMPOSE_PROJECT_NAME}
+      WORKER_REGISTRY: ${WORKER_REGISTRY:?Run via make}
+    volumes:
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+        bind: {create_host_path: false, propagation: rprivate}
+      - updater-state:/state
+    tmpfs: [/tmp:size=16777216,mode=1777]
+    cpus: 0.25
+    mem_limit: 128m
+    pids_limit: 32
+    stop_grace_period: 45s
+    logging:
+      driver: json-file
+      options: {max-size: 5m, max-file: "4"}
+    healthcheck:
+      test: [CMD, python, -c, "import time; from pathlib import Path; raise SystemExit(0 if time.time()-Path('/tmp/updater-alive').stat().st_mtime < 2400 else 1)"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 120s
+volumes:
+  updater-state:

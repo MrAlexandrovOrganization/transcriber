@@ -104,6 +104,47 @@ def claim(**kwargs):
 
 
 class RemoteWorkerTests(unittest.TestCase):
+    def test_drain_finishes_current_task_and_resumes_without_claiming(self):
+        with tempfile.TemporaryDirectory() as temp:
+            marker = pathlib.Path(temp) / "drained"
+            stub = FakeStub()
+            engine = FakeEngine(stub, wait=0.1)
+            worker = RemoteWorker(
+                config(poll_interval=0.01),
+                stub,
+                engine,
+                "synthetic-worker-token-at-least-32-characters",
+            )
+            claims = []
+
+            def do_claim(*args, **kwargs):
+                claims.append(1)
+                return claim() if len(claims) == 1 else pb.WorkerClaimResponse()
+
+            stub.Claim = do_claim
+            with patch("whisper.remote_worker.DRAIN_FILE", marker):
+                thread = threading.Thread(target=worker.run_forever)
+                thread.start()
+                try:
+                    self.assertTrue(engine.active.wait(1))
+                    worker.drain.set()
+                    until = time.monotonic() + 2
+                    while not marker.exists() and time.monotonic() < until:
+                        time.sleep(0.01)
+                    self.assertTrue(marker.exists())
+                    self.assertEqual(len(stub.completed), 1)
+                    self.assertEqual(len(claims), 1)
+                    self.assertFalse(stub.availability[-1].ready)
+                    worker.drain.clear()
+                    until = time.monotonic() + 2
+                    while len(claims) == 1 and time.monotonic() < until:
+                        time.sleep(0.01)
+                    self.assertGreater(len(claims), 1)
+                    self.assertFalse(marker.exists())
+                finally:
+                    worker.stop.set()
+                    thread.join(2)
+
     def test_container_readiness_tracks_successful_availability_reports(self):
         with tempfile.TemporaryDirectory() as temp:
             path = str(pathlib.Path(temp) / "ready")

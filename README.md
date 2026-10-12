@@ -27,7 +27,8 @@ Choose the machine's configuration first: `.env.server.example`,
 `.env.mac.example`, or `.env.wsl.example`. Copy the appropriate example to the
 ignored `.env` and provision its paths/credentials. The same `make up`, `down`,
 `restart`, `logs` and `ps` commands manage the selected stack on each machine.
-See [container workers and machine configuration](docs/container-workers.md).
+See [container workers and machine configuration](docs/container-workers.md) and
+[automatic worker deployment](docs/worker-autodeploy.md).
 Without `TRANSCRIBER_ROLE`, the existing server deployment remains the default.
 
 ```bash

@@ -63,7 +63,7 @@ class TunnelTests(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which("docker"), "Docker CLI required for Compose checks")
 class ComposeTests(unittest.TestCase):
-    def compose(self, profiles):
+    def compose(self, profiles, autodeploy=False):
         with tempfile.TemporaryDirectory() as temp:
             env_file = Path(temp) / "synthetic.env"
             env_file.write_text(
@@ -89,6 +89,13 @@ class ComposeTests(unittest.TestCase):
                 CUDNN_VERSION="synthetic",
                 CUBLAS_VERSION="synthetic",
             )
+            if autodeploy:
+                env.update(
+                    WORKER_CPU_IMAGE="synthetic/cpu@sha256:" + "a" * 64,
+                    WORKER_GPU_IMAGE="synthetic/gpu@sha256:" + "b" * 64,
+                    COMPOSE_PROJECT_NAME="synthetic-workers",
+                    WORKER_REGISTRY="ghcr.io/synthetic/transcriber",
+                )
             command = [
                 "docker",
                 "compose",
@@ -100,6 +107,8 @@ class ComposeTests(unittest.TestCase):
                 "--format",
                 "json",
             ]
+            if autodeploy:
+                command[6:6] = ["-f", "compose.workers.autodeploy.yml"]
             result = subprocess.run(
                 command,
                 cwd=ROOT,
@@ -131,6 +140,22 @@ class ComposeTests(unittest.TestCase):
                         self.assertTrue(volume["read_only"])
                         self.assertFalse(volume["bind"].get("create_host_path", False))
                         self.assertEqual(volume["bind"]["propagation"], "rprivate")
+
+    def test_registry_mode_preserves_profiles_and_limits_without_worker_builds(self):
+        services = self.compose("cpu,gpu", autodeploy=True)["services"]
+        for role in ("cpu", "gpu"):
+            worker = services["worker-" + role]
+            self.assertNotIn("build", worker)
+            self.assertIn("@sha256:", worker["image"])
+            self.assertEqual(worker["labels"]["io.transcriber.worker-role"], role)
+        self.assertEqual(
+            services["worker-cpu"]["environment"]["WHISPER_MODEL"], "large-v3"
+        )
+        self.assertNotIn("ports", services["worker-updater"])
+        self.assertEqual(
+            services["worker-updater"]["environment"]["WORKER_PROJECT"],
+            "synthetic-workers",
+        )
 
     def test_models_limits_and_devices_are_per_worker(self):
         services = self.compose("cpu,gpu")["services"]

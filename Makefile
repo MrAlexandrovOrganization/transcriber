@@ -2,6 +2,11 @@
 # Use unquoted assignments, or a Make/environment override.
 ENV_FILE ?= .env
 TRANSCRIBER_ROLE ?= $(or $(shell sed -n 's/^TRANSCRIBER_ROLE=//p' $(ENV_FILE) 2>/dev/null),server)
+WORKER_AUTODEPLOY ?= $(or $(shell sed -n 's/^WORKER_AUTODEPLOY=//p' $(ENV_FILE) 2>/dev/null),0)
+WORKER_REGISTRY ?= ghcr.io/mralexandrovorganization/transcriber
+export WORKER_REGISTRY
+WORKER_RELEASE_FILE ?= .worker-release.env
+WORKER_RELEASE_ENV = $(if $(wildcard $(WORKER_RELEASE_FILE)),--env-file "$(WORKER_RELEASE_FILE)")
 WORKER_API_ENABLED ?= $(shell sed -n 's/^WORKER_API_ENABLED=//p' $(ENV_FILE) 2>/dev/null)
 ifneq ($(filter-out server workers,$(strip $(TRANSCRIBER_ROLE))),)
 $(error TRANSCRIBER_ROLE must be an unquoted server or workers)
@@ -12,12 +17,17 @@ endif
 COMPOSE_FILES = -f docker-compose.yml
 ifeq ($(strip $(TRANSCRIBER_ROLE)),workers)
 COMPOSE_FILES = -f compose.workers.yml
+ifeq ($(strip $(WORKER_AUTODEPLOY)),1)
+COMPOSE_FILES += -f compose.workers.autodeploy.yml
+else
+WORKER_RELEASE_ENV =
+endif
 else
 ifeq ($(strip $(WORKER_API_ENABLED)),1)
 COMPOSE_FILES += -f compose.worker-api.yml
 endif
 endif
-DOCKER_COMPOSE = docker compose $(if $(wildcard $(ENV_FILE)),--env-file "$(ENV_FILE)") $(COMPOSE_FILES)
+DOCKER_COMPOSE = docker compose $(WORKER_RELEASE_ENV) $(if $(wildcard $(ENV_FILE)),--env-file "$(ENV_FILE)") $(COMPOSE_FILES)
 # Timestamped attestations change local image IDs even for a cached build,
 # causing an unnecessary Compose restart on every make up.
 BUILDX_NO_DEFAULT_ATTESTATIONS ?= 1
@@ -48,7 +58,16 @@ proto: proto-lint
 		proto/whisper.proto
 
 .PHONY: up
-up: config-check
+up:
+ifeq ($(strip $(TRANSCRIBER_ROLE)):$(strip $(WORKER_AUTODEPLOY)),workers:1)
+	$(MAKE) worker-release
+endif
+	$(MAKE) up-selected
+
+up-selected: config-check
+ifeq ($(strip $(TRANSCRIBER_ROLE)):$(strip $(WORKER_AUTODEPLOY)),workers:1)
+	$(DOCKER_COMPOSE) stop worker-updater
+endif
 ifeq ($(strip $(TRANSCRIBER_ROLE)),workers)
 	$(DOCKER_COMPOSE) up -d --build --remove-orphans --wait --wait-timeout 180
 else
@@ -65,6 +84,9 @@ endif
 .PHONY: down
 down:
 ifeq ($(strip $(TRANSCRIBER_ROLE)),workers)
+ifeq ($(strip $(WORKER_AUTODEPLOY)),1)
+	$(DOCKER_COMPOSE) stop worker-updater
+endif
 	$(DOCKER_COMPOSE) --profile '*' down
 else
 	$(DOCKER_COMPOSE) down
@@ -77,6 +99,7 @@ logs:
 .PHONY: deploy
 deploy:
 	$(MAKE) up
+	$(DOCKER_COMPOSE) up -d --wait --wait-timeout 240
 
 .PHONY: restart
 restart:
@@ -175,6 +198,25 @@ pilot: proto-gen
 	poetry run python scripts/pilot_worker.py --audio '$(PILOT_AUDIO_FILE)'
 
 ci-versions:
-	@printf 'python=%s\npoetry=%s\nbuf=%s\npostgres=%s\n' '$(PYTHON_VERSION)' '$(POETRY_VERSION)' '$(BUF_VERSION)' '$(POSTGRES_VERSION)'
+	@printf 'python=%s\npoetry=%s\nbuf=%s\npostgres=%s\nbuildx=%s\n' '$(PYTHON_VERSION)' '$(POETRY_VERSION)' '$(BUF_VERSION)' '$(POSTGRES_VERSION)' '$(BUILDX_VERSION)'
 
 .PHONY: compose-build build-workers config-check-examples ps install-poetry proto-gen proto-check test test-integration test-db-up test-db-down config-check worker-api-config-check up-worker-api check run migrate run-remote-worker pilot ci-versions
+
+# CI and local bootstrap use the same publishing/resolution code.
+SOURCE_REVISION ?= $(shell git rev-parse HEAD)
+export SOURCE_REVISION
+worker-release:
+	python3 scripts/worker_release.py resolve
+
+publish-workers:
+	python3 scripts/worker_release.py publish --arch $(PUBLISH_ARCH)
+
+promote-workers:
+	python3 scripts/worker_release.py promote
+
+.PHONY: up-selected worker-release publish-workers promote-workers
+
+test-updater-docker:
+	python3 scripts/smoke_updater.py
+
+.PHONY: test-updater-docker

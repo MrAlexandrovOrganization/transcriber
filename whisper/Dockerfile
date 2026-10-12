@@ -39,6 +39,10 @@ COPY --from=proto-builder /proto-build/proto/ ./proto/
 CMD ["python", "-m", "whisper.main"]
 
 FROM runtime AS remote-cpu
+ARG SOURCE_REVISION=development
+LABEL org.opencontainers.image.source="https://github.com/MrAlexandrovOrganization/transcriber" \
+      org.opencontainers.image.revision=${SOURCE_REVISION} \
+      io.transcriber.drain-protocol="1"
 ENV PYTHONUNBUFFERED=1
 USER 1000:1000
 CMD ["python", "-m", "whisper.remote_worker"]
@@ -64,3 +68,10 @@ WORKDIR /app
 COPY whisper/ssh_tunnel.py ./ssh_tunnel.py
 USER tunnel
 CMD ["python", "ssh_tunnel.py"]
+
+# Bootstrap infrastructure is built locally; only inference images are reconciled.
+FROM python:${PYTHON_VERSION}-slim AS updater
+WORKDIR /app
+COPY scripts/worker_updater.py scripts/worker_release.py ./
+ENV PYTHONUNBUFFERED=1
+CMD ["python", "worker_updater.py"]

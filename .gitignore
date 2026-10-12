@@ -8,3 +8,6 @@ __pycache__
 .venv/
 
 bot/gen/
+
+.worker-release.env
+.worker-release.tmp
