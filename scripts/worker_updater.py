@@ -191,7 +191,7 @@ class Updater:
                 raise APIError("Recovery refused an unmanaged container")
             if not new["State"]["Running"]:
                 self.docker.action(new["Id"], "start")
-            else:
+            elif new["State"].get("StartedAt") == pending.get("started"):
                 self.docker.action(new["Id"], "kill", signal="SIGUSR2")
         elif (
             new
@@ -229,64 +229,59 @@ class Updater:
                 "Worker needs initial make up before autodeploy: service=%s", role
             )
             return
+        if old["State"].get("Health", {}).get("Status") != "healthy":
+            LOG.warning(
+                "Waiting for worker readiness before draining: service=%s", role
+            )
+            return
         name, ident = old["Name"].lstrip("/"), old["Id"]
         LOG.info("Waiting for current task before update: service=%s", role)
         self.state["pending"] = {
             "old": ident,
+            "started": old["State"].get("StartedAt"),
             "name": name,
             "service": role,
             "image": image,
         }
         self.save()
         self.docker.action(ident, "kill", signal="SIGUSR1")
-        try:
-            deadline = time.monotonic() + self.drain_timeout
-            while not self.docker.drained(ident):
-                if STOP.wait(2) or time.monotonic() >= deadline:
-                    LOG.warning("Worker drain deferred: service=%s", role)
-                    self.recover()
-                    return
-            # Write a durable recovery record before the first destructive action.
-            self.state["pending"] = {
-                "old": ident,
-                "name": name,
-                "service": role,
-                "image": image,
-            }
-            self.save()
-            self.docker.action(ident, "stop", t=30)
-            self.docker.action(ident, "rename", name=name + "-rollback-" + ident[:12])
-            created = self.docker.call(
-                "POST",
-                "/containers/create?" + urlencode({"name": name}),
-                replacement(
-                    old,
-                    image,
-                    target["Id"],
-                    self.docker.call("GET", "/images/" + old["Image"] + "/json")[
-                        "Config"
-                    ],
-                    target.get("Config") or {},
-                ),
-            )
-            self.docker.action(created["Id"], "start")
-            deadline = time.monotonic() + self.health_timeout
-            while not STOP.wait(2):
-                new = self.docker.inspect(created["Id"])
-                if new and new["State"].get("Health", {}).get("Status") == "healthy":
-                    break
-                if (
-                    not new
-                    or not new["State"]["Running"]
-                    or time.monotonic() >= deadline
-                ):
-                    break
-            self.recover()
-        finally:
-            if "pending" not in self.state:
-                current = self.docker.inspect(ident)
-                if current and current["State"]["Running"]:
-                    self.docker.action(ident, "kill", signal="SIGUSR2")
+        deadline = time.monotonic() + self.drain_timeout
+        while not self.docker.drained(ident):
+            if STOP.wait(2) or time.monotonic() >= deadline:
+                LOG.warning("Worker drain deferred: service=%s", role)
+                self.recover()
+                return
+        # Write a durable recovery record before the first destructive action.
+        self.state["pending"] = {
+            "old": ident,
+            "started": old["State"].get("StartedAt"),
+            "name": name,
+            "service": role,
+            "image": image,
+        }
+        self.save()
+        self.docker.action(ident, "stop", t=30)
+        self.docker.action(ident, "rename", name=name + "-rollback-" + ident[:12])
+        created = self.docker.call(
+            "POST",
+            "/containers/create?" + urlencode({"name": name}),
+            replacement(
+                old,
+                image,
+                target["Id"],
+                self.docker.call("GET", "/images/" + old["Image"] + "/json")["Config"],
+                target.get("Config") or {},
+            ),
+        )
+        self.docker.action(created["Id"], "start")
+        deadline = time.monotonic() + self.health_timeout
+        while not STOP.wait(2):
+            new = self.docker.inspect(created["Id"])
+            if new and new["State"].get("Health", {}).get("Status") == "healthy":
+                break
+            if not new or not new["State"]["Running"] or time.monotonic() >= deadline:
+                break
+        self.recover()
 
     def reconcile(self):
         self.recover()

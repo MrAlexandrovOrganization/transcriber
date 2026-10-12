@@ -104,6 +104,8 @@ def main():
             restored = docker.inspect(project)
             assert restored["Id"] == good["Id"] and restored["State"]["Running"]
             assert updater.state["failed"]["cpu"] == names[2]
+            time.sleep(2)
+            assert docker.inspect(project)["State"]["Health"]["Status"] == "healthy"
             print(
                 json.dumps(
                     {

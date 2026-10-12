@@ -131,6 +131,8 @@ class ReleaseTests(unittest.TestCase):
             self.assertEqual(restarted.state["failed"]["cpu"], IMAGE)
             self.assertNotIn("pending", restarted.state)
             self.assertFalse(docker.inspect("new"))
+            # No signal may hit the restored process before Python installs handlers.
+            self.assertEqual(docker.actions[-1], ("old", "start", {}))
 
     def test_recovery_commits_a_healthy_replacement(self):
         with tempfile.TemporaryDirectory() as temp:

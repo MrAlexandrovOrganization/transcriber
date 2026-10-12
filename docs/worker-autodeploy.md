@@ -96,5 +96,6 @@ error bodies. Do not mount credentials or unrelated host paths into it.
 `make check` validates both Compose modes and fake-Docker recovery tests.
 Drain tests use fake RPC/inference and synthetic data. CI additionally checks
 real PostgreSQL and RPC behavior against an isolated temporary database.
-A real Docker update/rollback smoke must use a distinct synthetic project and
-must never inject jobs into the production queue.
+`make test-updater-docker` checks real Docker replacement and rollback in a
+distinct synthetic project, then removes only its own test containers/images.
+It never connects to the production queue. CI runs it before publication.
