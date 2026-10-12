@@ -153,6 +153,9 @@ class ComposeTests(unittest.TestCase):
         )
         self.assertNotIn("ports", services["worker-updater"])
         self.assertEqual(
+            services["worker-updater"]["tmpfs"], ["/tmp:size=16777216,mode=1777"]
+        )
+        self.assertEqual(
             services["worker-updater"]["environment"]["WORKER_PROJECT"],
             "synthetic-workers",
         )
