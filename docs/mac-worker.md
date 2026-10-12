@@ -1,5 +1,8 @@
 # Native Mac transcription worker
 
+Legacy native option for experiments/rollback. The standard per-machine
+`make up` lifecycle now uses [container workers](container-workers.md).
+
 This opt-in installation creates two **user LaunchAgents**: an SSH tunnel to
 `server` and one native Python worker. It runs while the user is logged in and
 the Mac is awake. It does not change SSH configuration, sleep or power settings.

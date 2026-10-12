@@ -13,6 +13,7 @@ from proto import whisper_pb2 as pb
 from whisper.inference import InferenceStopped, TranscriptionResult
 from whisper.limits import MAX_RESULT_BYTES
 from whisper.remote_worker import Config, RemoteWorker, read_token
+from whisper.worker_health import healthy
 
 
 class Offline(grpc.RpcError):
@@ -103,6 +104,30 @@ def claim(**kwargs):
 
 
 class RemoteWorkerTests(unittest.TestCase):
+    def test_container_readiness_tracks_successful_availability_reports(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = str(pathlib.Path(temp) / "ready")
+            stub = FakeStub()
+            worker = RemoteWorker(
+                config(health_file=path),
+                stub,
+                None,
+                "synthetic-worker-token-at-least-32-characters",
+            )
+            worker._report_availability(True)
+            self.assertTrue(healthy(path))
+            worker._report_availability(False)
+            self.assertFalse(healthy(path))
+            worker._report_availability(True)
+            with (
+                patch.object(stub, "ReportAvailability", side_effect=Offline),
+                patch.object(worker.stop, "wait", side_effect=[False, True]),
+                self.assertLogs("whisper.remote_worker", level="WARNING"),
+            ):
+                worker._report_availability_loop(0.01)
+            self.assertFalse(healthy(path))
+            self.assertFalse(worker._available.is_set())
+
     def test_availability_is_reported_while_busy_and_withdrawn_on_stop(self):
         stub = FakeStub()
         engine = FakeEngine(stub, wait=0.15)

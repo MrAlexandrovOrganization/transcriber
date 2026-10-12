@@ -1,0 +1,141 @@
+# Same code on every device; .env chooses profiles, models and resource limits.
+x-build: &build
+  context: .
+  dockerfile: whisper/Dockerfile
+  args: &build-args
+    PYTHON_VERSION: ${PYTHON_VERSION:?Run via make}
+    POETRY_VERSION: ${POETRY_VERSION:?Run via make}
+    GRPCIO_TOOLS_VERSION: ${GRPCIO_TOOLS_VERSION:?Run via make}
+    CUDNN_VERSION: ${CUDNN_VERSION:?Run via make}
+    CUBLAS_VERSION: ${CUBLAS_VERSION:?Run via make}
+
+x-lifecycle: &lifecycle
+  restart: unless-stopped
+  stop_grace_period: 30s
+  security_opt: [no-new-privileges:true]
+  cap_drop: [ALL]
+  read_only: true
+  tmpfs:
+    - /tmp:size=1073741824,mode=1777
+  logging:
+    driver: json-file
+    options: {max-size: 5m, max-file: "4"}
+
+x-environment: &environment
+  HOME: /tmp
+  HF_HOME: /models
+  HF_HUB_OFFLINE: "1"
+  HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"
+  WHISPER_LOCAL_FILES_ONLY: "1"
+  REMOTE_WORKER_ENDPOINT: 127.0.0.1:50055
+  REMOTE_WORKER_TOKEN_FILE: /run/credentials/token
+  REMOTE_WORKER_HEALTH_FILE: /tmp/worker-ready
+  WORKER_POLL_INTERVAL_S: ${WORKER_POLL_INTERVAL_S:-60}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+x-worker: &worker
+  <<: *lifecycle
+  user: ${WORKER_UID:-1000}:${WORKER_GID:-1000}
+  network_mode: service:worker-tunnel
+  depends_on:
+    worker-tunnel:
+      condition: service_healthy
+      restart: true
+  volumes:
+    - type: bind
+      source: ${MODEL_CACHE_PATH:?Set MODEL_CACHE_PATH to the prepared Hugging Face cache}
+      target: /models
+      read_only: true
+      bind: {create_host_path: false}
+    - type: bind
+      source: ${WORKER_TOKEN_PATH:?Set WORKER_TOKEN_PATH to a protected token file}
+      target: /run/credentials/token
+      read_only: true
+      bind: {create_host_path: false}
+  healthcheck:
+    test: [CMD, python, -m, whisper.worker_health]
+    interval: 20s
+    timeout: 5s
+    retries: 3
+    start_period: 120s
+
+services:
+  worker-tunnel:
+    <<: *lifecycle
+    build:
+      <<: *build
+      target: tunnel
+      args:
+        <<: *build-args
+        TUNNEL_UID: ${WORKER_UID:-1000}
+        TUNNEL_GID: ${WORKER_GID:-1000}
+    environment:
+      SSH_HOST: ${SSH_HOST:?Set SSH_HOST to the coordinator SSH address}
+      SSH_USER: ${SSH_USER:?Set SSH_USER}
+      SSH_PORT: ${SSH_PORT:-22}
+    volumes:
+      - type: bind
+        source: ${SSH_IDENTITY_PATH:?Set SSH_IDENTITY_PATH to a protected SSH key}
+        target: /run/credentials/identity
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${SSH_KNOWN_HOSTS_PATH:?Set SSH_KNOWN_HOSTS_PATH to trusted host keys}
+        target: /run/credentials/known_hosts
+        read_only: true
+        bind: {create_host_path: false}
+    mem_limit: 128m
+    cpus: 0.25
+    pids_limit: 32
+    healthcheck:
+      test: [CMD, python, -c, "import socket; socket.create_connection(('127.0.0.1',50055),timeout=2).close()"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  worker-cpu:
+    <<: *worker
+    profiles: [cpu]
+    build:
+      <<: *build
+      target: remote-cpu
+    environment:
+      <<: *environment
+      WORKER_ID: ${CPU_WORKER_ID:-worker-cpu}
+      WHISPER_MODEL: ${CPU_MODEL:-large-v3}
+      WHISPER_DEVICE: cpu
+      WHISPER_COMPUTE_TYPE: ${CPU_COMPUTE_TYPE:-int8}
+      WHISPER_CPU_THREADS: ${CPU_THREADS:-2}
+      OMP_NUM_THREADS: ${CPU_THREADS:-2}
+      OPENBLAS_NUM_THREADS: ${CPU_THREADS:-2}
+    mem_limit: ${CPU_MEMORY_LIMIT:-5500m}
+    memswap_limit: ${CPU_MEMORY_LIMIT:-5500m}
+    cpus: ${CPU_LIMIT:-2}
+    pids_limit: 96
+
+  worker-gpu:
+    <<: *worker
+    profiles: [gpu]
+    build:
+      <<: *build
+      target: remote-gpu
+    environment:
+      <<: *environment
+      WORKER_ID: ${GPU_WORKER_ID:-wsl-gpu}
+      WHISPER_MODEL: ${GPU_MODEL:-small}
+      WHISPER_DEVICE: cuda
+      WHISPER_COMPUTE_TYPE: ${GPU_COMPUTE_TYPE:-int8_float16}
+      WHISPER_CPU_THREADS: ${GPU_THREADS:-2}
+      OMP_NUM_THREADS: ${GPU_THREADS:-2}
+      OPENBLAS_NUM_THREADS: ${GPU_THREADS:-2}
+    mem_limit: ${GPU_MEMORY_LIMIT:-3g}
+    memswap_limit: ${GPU_MEMORY_LIMIT:-3g}
+    cpus: ${GPU_CPU_LIMIT:-1.5}
+    pids_limit: 96
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

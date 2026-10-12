@@ -47,7 +47,8 @@ and the API on loopback behind SSH. Per-device credentials/revocation are a late
 hardening step.
 
 Rollout updates ingress and permanent worker together through Git/CI/CD, then
-restarts native workers on the same published revision. Migration
+updates remote worker containers on the same published revision with `make up`.
+See [per-machine container configuration](container-workers.md). Migration
 `0003_worker_availability.sql` is additive and tracked by the existing ledger.
 Old clients remain protocol compatible; an old preferred native worker that
 cannot report availability will not claim work until upgraded.

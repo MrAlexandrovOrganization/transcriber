@@ -1,9 +1,12 @@
-.venv
 .git
+.venv
 .env
 .env.*
 .secrets
+__pycache__
+**/__pycache__
 .ruff_cache
+*.pyc
 notes
 typings
 .*md

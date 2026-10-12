@@ -1,5 +1,8 @@
 # Native WSL GPU/CPU workers
 
+Legacy native option for experiments/rollback. The standard per-machine
+`make up` lifecycle now uses [container workers](container-workers.md).
+
 Два независимых процесса используют общую durable очередь через WorkerService:
 
 | Worker ID | Модель | Runtime | Потоки CPU | Конкурентность |

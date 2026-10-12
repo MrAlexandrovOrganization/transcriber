@@ -47,6 +47,7 @@ services:
     build:
       context: .
       dockerfile: whisper/Dockerfile
+      target: runtime
       args: &build-args
         PYTHON_VERSION: ${PYTHON_VERSION:?Run via make}
         POETRY_VERSION: ${POETRY_VERSION:?Run via make}
@@ -97,6 +98,7 @@ services:
     build:
       context: .
       dockerfile: whisper/Dockerfile
+      target: runtime
       args: *build-args
     environment:
       SERVICE_ROLE: worker
@@ -111,8 +113,10 @@ services:
       JOB_TTL_S: 7200
       CLEANUP_INTERVAL_S: 600
       WORKER_POLL_INTERVAL_S: 2
-      WHISPER_MODEL: large
-      WHISPER_CPU_THREADS: 8
+      WHISPER_MODEL: ${SERVER_WORKER_MODEL:-large}
+      WHISPER_DEVICE: cpu
+      WHISPER_COMPUTE_TYPE: ${SERVER_WORKER_COMPUTE_TYPE:-int8}
+      WHISPER_CPU_THREADS: ${SERVER_WORKER_CPU_THREADS:-8}
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
     volumes:
       - whisper-model-cache:/root/.cache/huggingface
@@ -128,8 +132,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: 4.0g
-          cpus: "8.0"
+          memory: ${SERVER_WORKER_MEMORY_LIMIT:-4.0g}
+          cpus: ${SERVER_WORKER_CPU_LIMIT:-8.0}
         reservations:
           memory: 2g
 

@@ -18,10 +18,17 @@ Durable asynchronous Whisper transcription service.
 - A worker stores the final result before marking the job `done`; durable clients
   can separately acknowledge receipt with `Ack`.
 - If a worker dies before lease renewal, the job becomes claimable again and is retried.
-- Native Mac/WSL workers are preferred; the permanent server worker claims only
+- Mac/WSL remote workers are preferred; the permanent server worker claims only
   while all preferred workers are unavailable. See [availability and priority](docs/worker-priority.md).
 
 ## Local run
+
+Choose the machine's configuration first: `.env.server.example`,
+`.env.mac.example`, or `.env.wsl.example`. Copy the appropriate example to the
+ignored `.env` and provision its paths/credentials. The same `make up`, `down`,
+`restart`, `logs` and `ps` commands manage the selected stack on each machine.
+See [container workers and machine configuration](docs/container-workers.md).
+Without `TRANSCRIBER_ROLE`, the existing server deployment remains the default.
 
 ```bash
 make proto
@@ -94,7 +101,13 @@ and ledger rather than reversing migrations.
 - `WHISPER_CPU_THREADS`
 - `PREFERRED_WORKER_IDS`, `WORKER_AVAILABILITY_TTL_S`, `WORKER_FALLBACK`
 
-## Native Mac/WSL workers (opt in)
+## Remote workers
+
+The standard Mac/WSL lifecycle is now Docker Compose configured by `.env`.
+See [container workers](docs/container-workers.md) for profiles, per-worker
+models and limits, prerequisites, readiness, CI and native-to-container migration.
+The older native launchers below remain available for rollback/experiments;
+avoid running both installations simultaneously with the same worker IDs.
 
 For a managed native WSL GPU/CPU installation, see
 [WSL worker prerequisites, setup and systemd lifecycle](docs/wsl-worker.md).

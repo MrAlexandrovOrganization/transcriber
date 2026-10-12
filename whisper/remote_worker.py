@@ -28,6 +28,7 @@ from whisper.inference import FasterWhisperEngine, InferenceStopped
 from whisper.jsonlog import setup_logging
 from whisper.limits import MAX_RESULT_BYTES
 from whisper.telemetry import context_from_carrier, init_telemetry
+from whisper.worker_health import report as report_health
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,7 @@ class Config:
     tls: bool = False
     tls_ca_file: str = ""
     shutdown_grace: float = 10.0
+    health_file: str = ""
 
     def __post_init__(self):
         target = urlsplit("//" + self.endpoint)
@@ -108,6 +110,7 @@ class Config:
             tls=os.getenv("REMOTE_WORKER_TLS", "0") == "1",
             tls_ca_file=os.getenv("REMOTE_WORKER_TLS_CA_FILE", ""),
             shutdown_grace=float(os.getenv("REMOTE_WORKER_SHUTDOWN_GRACE_S", "10")),
+            health_file=os.getenv("REMOTE_WORKER_HEALTH_FILE", ""),
         )
 
 
@@ -201,6 +204,7 @@ class RemoteWorker:
                     self.stop.wait(self.config.poll_interval)
         finally:
             self.stop.set()
+            report_health(self.config.health_file, False)
             if reporter is not None:
                 reporter.join(timeout=4)
                 try:
@@ -221,6 +225,7 @@ class RemoteWorker:
         )
         if not response.accepted or response.ttl_seconds < 30:
             raise ValueError("Coordinator rejected worker availability")
+        report_health(self.config.health_file, ready)
         return min(20.0, response.ttl_seconds / 3.0)
 
     def _report_availability_loop(self, interval):
@@ -230,6 +235,7 @@ class RemoteWorker:
                 self._available.set()
             except Exception:
                 self._available.clear()
+                report_health(self.config.health_file, False)
                 logger.warning(
                     "Worker availability report unavailable; retry scheduled"
                 )
@@ -378,6 +384,7 @@ def main():
         signal.signal(sig, lambda *_: stop.set())
     try:
         config = Config.from_env()
+        report_health(config.health_file, False)
         token = read_token(config.token_file)
         # Load dependencies and model before leasing any task.
         engine = FasterWhisperEngine()
