@@ -917,6 +917,19 @@ class WorkerAPITests(unittest.TestCase):
                 "ALTER TABLE transcription_jobs DROP COLUMN request_id, DROP COLUMN retain_until_ack, DROP COLUMN acknowledged_at"
             )
             # Emulate the old production schema, which predates availability.
+            conn.execute(
+                "DROP TRIGGER transcription_job_observation ON transcription_jobs"
+            )
+            conn.execute("DROP FUNCTION transcriber_observe_job()")
+            conn.execute(
+                "DROP FUNCTION transcriber_observe(TEXT, TEXT, DOUBLE PRECISION)"
+            )
+            conn.execute(
+                "DROP TABLE transcription_observations, transcription_worker_reports"
+            )
+            conn.execute(
+                "ALTER TABLE transcription_jobs DROP COLUMN attempt_started_at"
+            )
             conn.execute("DROP TABLE worker_availability")
             conn.execute("DROP TABLE transcriber_schema_migrations")
         self.store.init_schema()
@@ -931,7 +944,7 @@ class WorkerAPITests(unittest.TestCase):
                 conn.execute(
                     "SELECT COUNT(*) AS n FROM transcriber_schema_migrations"
                 ).fetchone()["n"],
-                3,
+                4,
             )
 
     def test_real_mac_inference_optional(self):

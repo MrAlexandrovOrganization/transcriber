@@ -16,6 +16,8 @@ networks:
       com.docker.network.driver.mtu: "1376"
   jaeger-net:
     external: true
+  prometheus-net:
+    external: true
 
 services:
   postgres:
@@ -65,6 +67,8 @@ services:
       WORKER_AVAILABILITY_TTL_S: ${WORKER_AVAILABILITY_TTL_S:-90}
       JOB_TTL_S: 7200
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+      METRICS_ADDRESS: transcriber-metrics:9108
+      FALLBACK_WORKER_ID: server-fallback
     volumes:
       - whisper-job-data:/data/jobs
     restart: unless-stopped
@@ -72,8 +76,10 @@ services:
       postgres:
         condition: service_healthy
     networks:
-      - whisper-net
-      - jaeger-net
+      whisper-net: {}
+      jaeger-net: {}
+      prometheus-net:
+        aliases: [transcriber-metrics]
     healthcheck:
       test:
         - CMD

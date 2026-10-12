@@ -1,0 +1,6 @@
+[
+  {
+    "targets": ["transcriber-metrics:9108"],
+    "labels": {"service": "transcriber"}
+  }
+]

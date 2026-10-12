@@ -19,6 +19,7 @@ from opentelemetry.trace import SpanKind, Status, StatusCode
 
 from proto import whisper_pb2, whisper_pb2_grpc
 from whisper.inference import FasterWhisperEngine, InferenceStopped
+from whisper.metrics import MetricsEndpoint
 from whisper.storage import (
     ClaimedJob,
     JobRecord,
@@ -277,18 +278,44 @@ class Worker:
 
     def run_forever(self, stop: threading.Event | None = None) -> None:
         stop = stop or threading.Event()
-        while not stop.is_set():
+        instance_id = str(uuid.uuid4())
+        reports_done = threading.Event()
+
+        def report_availability():
+            # This starts only after the model has loaded. A separate thread
+            # keeps reporting while synchronous inference is busy.
+            while not reports_done.is_set():
+                try:
+                    self._store.report_availability(self._worker_id, instance_id, True)
+                except Exception:
+                    logger.warning("Local worker availability report failed")
+                if reports_done.wait(self._store.availability_ttl_seconds / 3):
+                    return
+
+        reporter = threading.Thread(
+            target=report_availability, daemon=True, name="local-worker-availability"
+        )
+        reporter.start()
+        try:
+            while not stop.is_set():
+                try:
+                    claimed = self._store.claim_next_job(
+                        self._worker_id, fallback=self._fallback
+                    )
+                    if claimed is not None:
+                        self._process_claimed_job(claimed, stop)
+                        continue
+                except Exception:
+                    # Connection errors can contain a DSN; do not log exception text.
+                    logger.error("Worker queue operation failed")
+                stop.wait(_WORKER_POLL_INTERVAL_S)
+        finally:
+            reports_done.set()
+            reporter.join(timeout=10)
             try:
-                claimed = self._store.claim_next_job(
-                    self._worker_id, fallback=self._fallback
-                )
-                if claimed is not None:
-                    self._process_claimed_job(claimed, stop)
-                    continue
+                self._store.report_availability(self._worker_id, instance_id, False)
             except Exception:
-                # Connection errors can contain a DSN; do not log exception text.
-                logger.error("Worker queue operation failed")
-            stop.wait(_WORKER_POLL_INTERVAL_S)
+                logger.warning("Local worker availability withdrawal failed")
 
     def _process_claimed_job(self, claimed: ClaimedJob, stop: threading.Event) -> None:
         job = claimed.job
@@ -408,7 +435,14 @@ def run_ingress() -> None:
     )
     if not server.add_insecure_port(f"{os.getenv('GRPC_BIND_HOST', '[::]')}:{port}"):
         raise ValueError("Cannot bind transcription endpoint")
-    worker_servers = start_worker_apis(store)
+    metrics_address = os.getenv("METRICS_ADDRESS", "")
+    metrics = MetricsEndpoint(store, metrics_address) if metrics_address else None
+    try:
+        worker_servers = start_worker_apis(store)
+    except Exception:
+        if metrics:
+            metrics.close()
+        raise
     threading.Thread(
         target=CleanupWorker(store).run_forever, daemon=True, name="cleanup-worker"
     ).start()
@@ -423,6 +457,8 @@ def run_ingress() -> None:
     signal.signal(signal.SIGINT, stop_servers)
     logger.info("Whisper ingress gRPC server started on port %s", port)
     server.wait_for_termination()
+    if metrics:
+        metrics.close()
 
 
 def run_worker() -> None:

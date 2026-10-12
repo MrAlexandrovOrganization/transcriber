@@ -123,6 +123,18 @@ class JobStore:
     def connect(self) -> psycopg.Connection:
         return psycopg.connect(self._dsn, row_factory=dict_row)
 
+    def metrics_snapshot(self) -> dict[str, list[dict]]:
+        # Independent, bounded, read-only snapshot: scrapes never hold job locks.
+        with psycopg.connect(
+            self._dsn, row_factory=dict_row, connect_timeout=3
+        ) as conn:
+            conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            conn.execute("SET LOCAL statement_timeout = '3s'")
+            return {
+                name: conn.execute(_sql("metrics_" + name)).fetchall()
+                for name in ("jobs", "workers", "running", "observations")
+            }
+
     def init_schema(self) -> None:
         # Keep the established startup migration policy, now with a ledger and
         # one transaction/advisory lock shared by ingress and local workers.
@@ -352,7 +364,10 @@ class JobStore:
     def report_availability(
         self, worker_id: str, instance_id: str, ready: bool
     ) -> bool:
-        with self.connect() as conn:
+        with psycopg.connect(
+            self._dsn, connect_timeout=3, row_factory=dict_row
+        ) as conn:
+            conn.execute("SET LOCAL statement_timeout = '3s'")
             conn.execute(_sql("cleanup_availability"))
             conn.execute(
                 _sql("report_availability"),

@@ -1,6 +1,8 @@
 # Read only non-secret selectors; never source/evaluate the whole .env.
 # Use unquoted assignments, or a Make/environment override.
 ENV_FILE ?= .env
+MONITORING_DATA_DIR ?= $(HOME)/.monitoring
+export MONITORING_DATA_DIR
 TRANSCRIBER_ROLE ?= $(or $(shell sed -n 's/^TRANSCRIBER_ROLE=//p' $(ENV_FILE) 2>/dev/null),server)
 WORKER_AUTODEPLOY ?= $(or $(shell sed -n 's/^WORKER_AUTODEPLOY=//p' $(ENV_FILE) 2>/dev/null),0)
 WORKER_REGISTRY ?= ghcr.io/mralexandrovorganization/transcriber
@@ -86,6 +88,7 @@ ifeq ($(strip $(TRANSCRIBER_ROLE)),workers)
 	$(DOCKER_COMPOSE) up -d --build --remove-orphans --wait --wait-timeout 180
 else
 	$(DOCKER_COMPOSE) up -d --build --remove-orphans
+	$(MAKE) monitoring-install
 endif
 ifeq ($(strip $(TRANSCRIBER_ROLE)),workers)
 	@set -e; for service in worker-cpu worker-gpu; do \
@@ -192,7 +195,7 @@ config-check-examples:
 	$(MAKE) ENV_FILE=.env.wsl.example TRANSCRIBER_ROLE=workers config-check
 	$(MAKE) ENV_FILE=.env.server.example TRANSCRIBER_ROLE=server WORKER_API_ENABLED=0 WORKER_TLS_ENABLED=1 config-check
 
-check: proto-gen proto-check config-check config-check-examples
+check: proto-gen proto-check config-check config-check-examples monitoring-check
 	poetry run ruff check whisper tests scripts
 	poetry run ruff format --check whisper tests scripts
 	$(MAKE) test
@@ -252,3 +255,16 @@ restart-worker-api:
 	$(DOCKER_COMPOSE) up -d --no-deps --force-recreate --wait --wait-timeout 240 whisper-ingress
 
 .PHONY: test-worker-tls-docker restart-worker-api
+
+dashboards:
+	python3 scripts/render_dashboards.py
+
+monitoring-check:
+	python3 scripts/render_dashboards.py --check
+	python3 scripts/render_dashboards.py --rules | docker run --rm -i --entrypoint promtool prom/prometheus:$(PROMETHEUS_CHECK_VERSION) check rules /dev/stdin
+
+monitoring-install:
+	@test '$(TRANSCRIBER_ROLE)' = server || (echo 'Requires server role'; exit 1)
+	python3 scripts/install_monitoring.py
+
+.PHONY: dashboards monitoring-check monitoring-install

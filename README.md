@@ -29,6 +29,8 @@ ignored `.env` and provision its paths/credentials. The same `make up`, `down`,
 `restart`, `logs` and `ps` commands manage the selected stack on each machine.
 See [container workers and machine configuration](docs/container-workers.md) and
 [automatic worker deployment](docs/worker-autodeploy.md).
+The server also provisions [transcription dashboards and metrics](docs/monitoring.md)
+into the existing Grafana/Prometheus stack.
 Without `TRANSCRIBER_ROLE`, the existing server deployment remains the default.
 
 ```bash
