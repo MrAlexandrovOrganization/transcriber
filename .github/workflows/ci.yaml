@@ -30,6 +30,7 @@ jobs:
       - uses: bufbuild/buf-setup-action@v1
         with:
           version: ${{ steps.versions.outputs.buf }}
+          github_token: ${{ github.token }}
       - run: make install-poetry install
       - name: Check against the previous published contract
         run: make check
