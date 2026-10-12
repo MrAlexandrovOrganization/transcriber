@@ -694,16 +694,40 @@ class WorkerAPITests(unittest.TestCase):
 
     def test_interrupted_client_upload_replays_same_job_and_replaces_partial(self):
         release = threading.Event()
+        cancelled = threading.Event()
+        submit_reserved = TranscriptionServicer._submit_reserved
+
+        def observe_cancellation(servicer, upload, first, iterator, context, limit):
+            context.add_callback(cancelled.set)
+
+            def cancelled_stream():
+                yield from iterator
+                # Cancellation and iterator EOF arrive on different gRPC
+                # threads. Exercise the interrupted-upload branch only after
+                # the server has observed the client's cancellation.
+                if not cancelled.wait(3):
+                    raise TimeoutError("Server did not observe cancellation")
+
+            return submit_reserved(
+                servicer, upload, first, cancelled_stream(), context, limit
+            )
 
         def stream():
             yield self.client_chunk(audio=b"partial")
             release.wait(3)
             yield pb.TranscribeChunk(data=b"not accepted after cancellation")
 
-        pending = self.client_stub.Submit.future(stream(), timeout=5)
-        original = self.wait_upload_started()
-        pending.cancel()
-        release.set()
+        with patch.object(
+            TranscriptionServicer, "_submit_reserved", observe_cancellation
+        ):
+            pending = self.client_stub.Submit.future(stream(), timeout=5)
+            try:
+                original = self.wait_upload_started()
+                pending.cancel()
+                self.assertTrue(cancelled.wait(3))
+            finally:
+                release.set()
+                pending.cancel()
         deadline = time.monotonic() + 3
         while True:
             try:
