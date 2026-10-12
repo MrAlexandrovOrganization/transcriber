@@ -90,8 +90,11 @@ ordinary Docker network namespace and token mount. No ports are published.
    listeners have separate credentials; the legacy token cannot use public RPCs.
 4. Check there are no in-flight jobs to interrupt, or drain workers with SIGUSR1
    and wait for `/tmp/worker-drained`. Stop the autodeploy controller during the
-   topology change. Update the bootstrap checkout and per-device `.env`;
-   `make up` recreates workers and removes the orphan tunnel container.
+   topology change. After draining, explicitly stop the old inference containers
+   before running Compose: they still reference the tunnel's network namespace.
+   Update the bootstrap checkout and per-device `.env`; `make up` recreates
+   workers and removes the orphan tunnel container. Keep the coordinator's
+   permanent fallback worker running during this brief per-device transition.
 5. Verify TLS registration, identity rejection, readiness and unchanged model
    settings on both devices. Disable `WORKER_API_ENABLED` and recreate ingress
    with `make restart-worker-api`; confirm port 50055 is no longer published.
