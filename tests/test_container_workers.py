@@ -126,6 +126,11 @@ class ComposeTests(unittest.TestCase):
                     self.assertNotIn("ports", config)
                     self.assertTrue(config["read_only"])
                     self.assertEqual(config["cap_drop"], ["ALL"])
+                for config in services.values():
+                    for volume in config["volumes"]:
+                        self.assertTrue(volume["read_only"])
+                        self.assertFalse(volume["bind"].get("create_host_path", False))
+                        self.assertEqual(volume["bind"]["propagation"], "rprivate")
 
     def test_models_limits_and_devices_are_per_worker(self):
         services = self.compose("cpu,gpu")["services"]

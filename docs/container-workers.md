@@ -84,8 +84,10 @@ does not currently route jobs by model or guarantee equal recognition quality.
 Use absolute host paths. Private files remain outside Git, owned by the selected
 UID and mode `0600`, with protected parent directories. `.env` stores paths,
 not key/token contents. Missing bind sources fail rather than becoming empty
-directories. The tunnel forwards only inside its container network namespace;
-workers share that namespace and use `127.0.0.1:50055`. No worker API port is
+directories. Bind propagation is explicitly `rprivate`, including for credential
+files, for compatibility with the tested Docker Desktop WSL integration.
+The tunnel forwards only inside its container network namespace; workers share
+that namespace and use `127.0.0.1:50055`. No worker API port is
 published on the device and no insecure remote gRPC exception is needed.
 
 CPU and CUDA targets share the same Python application and Poetry lockfile.

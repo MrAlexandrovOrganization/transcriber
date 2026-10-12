@@ -46,12 +46,12 @@ x-worker: &worker
       source: ${MODEL_CACHE_PATH:?Set MODEL_CACHE_PATH to the prepared Hugging Face cache}
       target: /models
       read_only: true
-      bind: {create_host_path: false}
+      bind: {create_host_path: false, propagation: rprivate}
     - type: bind
       source: ${WORKER_TOKEN_PATH:?Set WORKER_TOKEN_PATH to a protected token file}
       target: /run/credentials/token
       read_only: true
-      bind: {create_host_path: false}
+      bind: {create_host_path: false, propagation: rprivate}
   healthcheck:
     test: [CMD, python, -m, whisper.worker_health]
     interval: 20s
@@ -78,12 +78,12 @@ services:
         source: ${SSH_IDENTITY_PATH:?Set SSH_IDENTITY_PATH to a protected SSH key}
         target: /run/credentials/identity
         read_only: true
-        bind: {create_host_path: false}
+        bind: {create_host_path: false, propagation: rprivate}
       - type: bind
         source: ${SSH_KNOWN_HOSTS_PATH:?Set SSH_KNOWN_HOSTS_PATH to trusted host keys}
         target: /run/credentials/known_hosts
         read_only: true
-        bind: {create_host_path: false}
+        bind: {create_host_path: false, propagation: rprivate}
     mem_limit: 128m
     cpus: 0.25
     pids_limit: 32
