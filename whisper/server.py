@@ -162,6 +162,10 @@ class TranscriptionServicer(whisper_pb2_grpc.TranscriptionServiceServicer):
                         too_large = True
                         raise ValueError("input_too_large")
                     audio.write(chunk.data)
+                # gRPC may end the iterator without raising on cancellation.
+                # Never publish a truncated stream as a complete input file.
+                if not context.is_active():
+                    raise InterruptedError("Upload interrupted")
                 audio.flush()
                 os.fsync(audio.fileno())
             os.replace(temporary, upload.input_path)
