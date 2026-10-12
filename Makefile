@@ -18,6 +18,10 @@ COMPOSE_FILES += -f compose.worker-api.yml
 endif
 endif
 DOCKER_COMPOSE = docker compose $(if $(wildcard $(ENV_FILE)),--env-file "$(ENV_FILE)") $(COMPOSE_FILES)
+# Timestamped attestations change local image IDs even for a cached build,
+# causing an unnecessary Compose restart on every make up.
+BUILDX_NO_DEFAULT_ATTESTATIONS ?= 1
+export BUILDX_NO_DEFAULT_ATTESTATIONS
 include versions.mk
 
 .PHONY: install

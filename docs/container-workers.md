@@ -111,6 +111,10 @@ it is safe. `make down` stops the selected project including disabled worker
 profiles, without deleting model caches or server volumes. Worker examples use
 `COMPOSE_PROJECT_NAME=transcriber-workers`, separate from an existing local
 `transcriber` server stack; keep project names stable across updates.
+Local Make builds disable default timestamped provenance attestations so a
+cached rebuild does not change image IDs and restart unchanged workers. This
+can be overridden with `BUILDX_NO_DEFAULT_ATTESTATIONS=0` when publishing images
+with provenance; it is unrelated to application readiness.
 
 Docker status `running` means the process is alive. A worker becomes `healthy`
 after loading its model and successfully registering with the coordinator.
