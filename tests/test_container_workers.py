@@ -10,7 +10,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from whisper.ssh_tunnel import arguments
 from whisper.worker_health import healthy, report
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -41,29 +40,9 @@ class ContainerHealthTests(unittest.TestCase):
         report("", False)
 
 
-class TunnelTests(unittest.TestCase):
-    def test_forwarding_is_loopback_only_and_host_keys_are_required(self):
-        args = arguments({"SSH_HOST": "synthetic.example", "SSH_USER": "worker"})
-        self.assertIn("127.0.0.1:50055:127.0.0.1:50055", args)
-        self.assertIn("StrictHostKeyChecking=yes", args)
-        self.assertIn("BatchMode=yes", args)
-        self.assertEqual(args[-1], "synthetic.example")
-
-    def test_invalid_values_cannot_inject_ssh_options(self):
-        base = {"SSH_HOST": "synthetic.example", "SSH_USER": "worker"}
-        for key, values in {
-            "SSH_HOST": ["", "-oProxyCommand=bad", "host\nvalue", "host name"],
-            "SSH_USER": ["-root", "root\nvalue", "user@host"],
-            "SSH_PORT": ["0", "65536", "bad"],
-        }.items():
-            for value in values:
-                with self.subTest(key=key, value=value), self.assertRaises(ValueError):
-                    arguments(dict(base, **{key: value}))
-
-
 @unittest.skipUnless(shutil.which("docker"), "Docker CLI required for Compose checks")
 class ComposeTests(unittest.TestCase):
-    def compose(self, profiles, autodeploy=False, transport="tls"):
+    def compose(self, profiles, autodeploy=False):
         with tempfile.TemporaryDirectory() as temp:
             env_file = Path(temp) / "synthetic.env"
             env_file.write_text(
@@ -75,9 +54,6 @@ class ComposeTests(unittest.TestCase):
                 "CPU_WORKER_TOKEN_PATH=/synthetic/cpu.token\n"
                 "GPU_WORKER_TOKEN_PATH=/synthetic/gpu.token\n"
                 "REMOTE_WORKER_ENDPOINT=workers.example.com:443\n"
-                "SSH_HOST=synthetic.example\nSSH_USER=synthetic\n"
-                "SSH_IDENTITY_PATH=/synthetic/key\n"
-                "SSH_KNOWN_HOSTS_PATH=/synthetic/known_hosts\n"
             )
             env = {
                 key: value
@@ -104,15 +80,15 @@ class ComposeTests(unittest.TestCase):
                 "--env-file",
                 str(env_file),
                 "-f",
-                "compose.workers.yml",
+                "compose/workers.yml",
+                "--project-directory",
+                str(ROOT),
                 "config",
                 "--format",
                 "json",
             ]
-            if transport == "ssh":
-                command[6:6] = ["-f", "compose.workers.ssh.yml"]
             if autodeploy:
-                command[6:6] = ["-f", "compose.workers.autodeploy.yml"]
+                command[6:6] = ["-f", "compose/workers.autodeploy.yml"]
             result = subprocess.run(
                 command,
                 cwd=ROOT,
@@ -182,15 +158,6 @@ class ComposeTests(unittest.TestCase):
             ["gpu"],
         )
         self.assertNotEqual(cpu["volumes"][1]["source"], gpu["volumes"][1]["source"])
-
-    def test_ssh_is_an_explicit_legacy_overlay(self):
-        services = self.compose("cpu,gpu", transport="ssh")["services"]
-        self.assertEqual(set(services), {"worker-cpu", "worker-gpu", "worker-tunnel"})
-        for role in ("cpu", "gpu"):
-            worker = services["worker-" + role]
-            self.assertEqual(worker["network_mode"], "service:worker-tunnel")
-            self.assertEqual(worker["environment"]["REMOTE_WORKER_TLS"], "0")
-        self.assertNotIn("ports", services["worker-tunnel"])
 
 
 if __name__ == "__main__":

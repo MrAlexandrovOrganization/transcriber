@@ -43,7 +43,6 @@ class Config:
     rpc_timeout: float = 15.0
     download_timeout: float = 120.0
     max_input_bytes: int = 256 * 1024 * 1024
-    allow_insecure: bool = False
     tls: bool = False
     tls_ca_file: str = ""
     shutdown_grace: float = 10.0
@@ -85,15 +84,13 @@ class Config:
             loopback = loopback or ipaddress.ip_address(target.hostname).is_loopback
         except ValueError:
             pass
-        if not self.tls and not loopback and not self.allow_insecure:
-            raise ValueError(
-                "Remote plaintext requires REMOTE_WORKER_ALLOW_INSECURE=1 on a trusted VPN"
-            )
+        if not self.tls and not loopback:
+            raise ValueError("Remote workers require TLS outside loopback")
 
     @classmethod
     def from_env(cls):
         return cls(
-            endpoint=os.getenv("REMOTE_WORKER_ENDPOINT", "localhost:50055"),
+            endpoint=os.getenv("REMOTE_WORKER_ENDPOINT", "localhost:50056"),
             token_file=os.getenv("REMOTE_WORKER_TOKEN_FILE", ""),
             worker_id=os.getenv(
                 "WORKER_ID",
@@ -107,8 +104,7 @@ class Config:
             max_input_bytes=int(
                 os.getenv("REMOTE_WORKER_MAX_INPUT_BYTES", str(256 * 1024 * 1024))
             ),
-            allow_insecure=os.getenv("REMOTE_WORKER_ALLOW_INSECURE", "0") == "1",
-            tls=os.getenv("REMOTE_WORKER_TLS", "0") == "1",
+            tls=os.getenv("REMOTE_WORKER_TLS", "1") == "1",
             tls_ca_file=os.getenv("REMOTE_WORKER_TLS_CA_FILE", ""),
             shutdown_grace=float(os.getenv("REMOTE_WORKER_SHUTDOWN_GRACE_S", "10")),
             health_file=os.getenv("REMOTE_WORKER_HEALTH_FILE", ""),

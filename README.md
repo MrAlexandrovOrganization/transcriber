@@ -2,19 +2,39 @@
 
 ## Build versions
 
-`versions.mk` owns Python, Poetry and PostgreSQL versions. The exact
+`Makefiles/versions.mk` owns Python, Poetry and PostgreSQL versions. The exact
 grpcio-tools version is read from `poetry.lock`, also used for Python dependency
 installation. Run `make versions` to inspect values; install that Poetry version
 locally. Use `make build`/`make up`: Make exports versions to Compose build args.
 
 Durable asynchronous Whisper transcription service.
 
+## Compose configuration layout
+
+All Compose files live in `compose/`. Use the root `Makefile` as the entry point;
+the machine's `.env` selects the required files automatically.
+
+| File | Purpose |
+| --- | --- |
+| `compose/server.yml` | PostgreSQL, ingress and server fallback worker |
+| `compose/worker-tls.yml` | Server listener for Caddy and per-worker credentials |
+| `compose/workers.yml` | CPU/GPU workers selected by profiles |
+| `compose/workers.autodeploy.yml` | Published inference images and updater |
+
+Make passes `--project-directory` pointing to the checkout root. Build contexts,
+relative bind/secret paths, `.env` and the default Compose project name therefore
+keep their existing meaning. Keep `COMPOSE_PROJECT_NAME` unchanged to reuse
+existing volumes. Direct Compose invocations also need `--project-directory .`
+from the root, explicit `-f compose/...` files and the required exported versions.
+Prefer `make config-check`, `make build`, `make up`, `make ps` and `make logs`.
+The directory move does not require editing machine `.env` files.
+
 ## Architecture
 
-- [`whisper-ingress`](docker-compose.yml) accepts gRPC uploads and returns a `job_id` quickly.
-- Uploaded files are persisted to [`/data/jobs`](docker-compose.yml) on a Docker volume.
+- [`whisper-ingress`](compose/server.yml) accepts gRPC uploads and returns a `job_id` quickly.
+- Uploaded files are persisted to [`/data/jobs`](compose/server.yml) on a Docker volume.
 - Job metadata, status, retries, and worker leases are stored in Postgres.
-- [`whisper-worker`](docker-compose.yml) claims jobs via Postgres using `FOR UPDATE SKIP LOCKED`.
+- [`whisper-worker`](compose/server.yml) claims jobs via Postgres using `FOR UPDATE SKIP LOCKED`.
 - A worker stores the final result before marking the job `done`; durable clients
   can separately acknowledge receipt with `Ack`.
 - If a worker dies before lease renewal, the job becomes claimable again and is retried.
@@ -109,14 +129,8 @@ and ledger rather than reversing migrations.
 The standard Mac/WSL lifecycle is now Docker Compose configured by `.env`.
 See [container workers](docs/container-workers.md) for profiles, per-worker
 models and limits, prerequisites, readiness, CI and native-to-container migration.
-The older native launchers below remain available for rollback/experiments;
-avoid running both installations simultaneously with the same worker IDs.
-
-For a managed native WSL GPU/CPU installation, see
-[WSL worker prerequisites, setup and systemd lifecycle](docs/wsl-worker.md).
-It uses the locked project `.venv`, CUDA/cuBLAS supplied by WSL, and the optional
-cuDNN package pinned by `CUDNN_VERSION` in `versions.mk`; it does not install
-system drivers or change Windows startup/sleep settings.
+Native machine-specific SSH launchers have been removed. Use the same container
+worker configuration on Mac and WSL; CPU/GPU selection and models stay in `.env`.
 
 The existing PostgreSQL queue remains the source of truth. Remote workers use a
 separate, authenticated gRPC WorkerService to claim jobs, download audio, renew
@@ -124,7 +138,7 @@ leases and return results. They need neither database credentials nor a shared
 filesystem. No worker endpoint is enabled by the normal deployment.
 
 Start with a synthetic local experiment, using Python/Poetry at the versions
-from `versions.mk`, Buf at `BUF_VERSION`, and Docker with the pinned PostgreSQL
+from `Makefiles/versions.mk`, Buf at `BUF_VERSION`, and Docker with the pinned PostgreSQL
 image already present. Install dependencies with `make install`, then:
 
 ```bash
@@ -140,11 +154,10 @@ an existing queue/database. Missing model/image is a failed prerequisite.
 ## Remote workers over TLS
 
 Normal container workers connect directly to Caddy over gRPC/HTTP2 with TLS.
-Set `REMOTE_WORKER_ENDPOINT=workers.example.com:443`, `WORKER_TRANSPORT=tls`
-and a separate protected `CPU_WORKER_TOKEN_PATH`/`GPU_WORKER_TOKEN_PATH` for
+Set `REMOTE_WORKER_ENDPOINT=workers.example.com:443` and a separate protected `CPU_WORKER_TOKEN_PATH`/`GPU_WORKER_TOKEN_PATH` for
 each enabled role. No SSH key, tunnel or inbound laptop port is required.
 
-On the coordinator, `WORKER_TLS_ENABLED=1` enables `compose.worker-tls.yml` and
+On the coordinator, `WORKER_TLS_ENABLED=1` enables `compose/worker-tls.yml` and
 `WORKER_CREDENTIALS_PATH` selects a private JSON registry of SHA-256 token hashes
 bound to exact worker IDs. Caddy reaches the worker-only listener on the
 external internal Docker network `caddy-transcriber-net`; no worker port is
@@ -153,9 +166,10 @@ published. The client-facing API stays private. Start Caddy's network first.
 See [TLS provisioning and rollout](docs/worker-tls.md),
 [per-machine Compose](docs/container-workers.md), and
 [automatic image delivery](docs/worker-autodeploy.md).
-The optional `WORKER_API_ENABLED=1` overlay and explicit SSH transport remain
-for legacy migration/rollback; turn the legacy listener off after migration.
-The public listener never accepts the legacy shared token.
+SSH transport, the shared-token listener and their native launchers have been
+removed. Only individual worker credentials are accepted. Remote native CLI
+connections default to TLS; plaintext is restricted to loopback for isolated
+experiments. See [upgrade and rollback](docs/worker-tls.md#upgrade-and-rollback).
 
 Remote workers accept at most 256 MiB of audio by default. Results are limited
 to 4 MiB. Existing model/preset behavior, durable queue and leases are unchanged;

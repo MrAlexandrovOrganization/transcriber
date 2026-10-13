@@ -21,31 +21,10 @@ from whisper.worker_auth import WorkerCredentials
 logger = logging.getLogger(__name__)
 
 
-def read_worker_token(path: str) -> str:
-    try:
-        token = Path(path).read_text(encoding="utf-8").strip()
-    except (OSError, UnicodeError):
-        raise ValueError("Cannot read worker token file") from None
-    if (
-        len(token) < 32
-        or len(token) > 512
-        or not token.isascii()
-        or any(c.isspace() for c in token)
-    ):
-        raise ValueError(
-            "Worker token must contain 32..512 non-whitespace ASCII characters"
-        )
-    return token
-
-
 class WorkerServicer(rpc.WorkerServiceServicer):
-    def __init__(self, store: JobStore, credentials: WorkerCredentials | str):
+    def __init__(self, store: JobStore, credentials: WorkerCredentials):
         self._store = store
-        self._credentials = (
-            WorkerCredentials.legacy(credentials)
-            if isinstance(credentials, str)
-            else credentials
-        )
+        self._credentials = credentials
 
     def _authenticate(self, context, *, worker_id=None, lease_token=None):
         values = [
@@ -58,9 +37,8 @@ class WorkerServicer(rpc.WorkerServiceServicer):
             context.abort(
                 grpc.StatusCode.UNAUTHENTICATED, "Worker authentication required"
             )
-        if identity and (
-            (worker_id is not None and identity != worker_id)
-            or (lease_token is not None and not lease_token.startswith(identity + "/"))
+        if (worker_id is not None and identity != worker_id) or (
+            lease_token is not None and not lease_token.startswith(identity + "/")
         ):
             context.abort(grpc.StatusCode.PERMISSION_DENIED, "Worker identity mismatch")
 
@@ -229,18 +207,12 @@ class WorkerServicer(rpc.WorkerServiceServicer):
 
 
 def start_worker_apis(store: JobStore):
-    """Public credentials never fall back to the legacy loopback token."""
-    listeners = []
-    legacy_address = os.getenv("WORKER_GRPC_ADDR", "")
-    if legacy_address:
-        listeners.append(
-            (
-                legacy_address,
-                WorkerCredentials.legacy(
-                    read_worker_token(os.getenv("WORKER_TOKEN_FILE", ""))
-                ),
-            )
+    """Start the scoped worker endpoint behind Caddy, or a loopback test endpoint."""
+    if os.getenv("WORKER_GRPC_ADDR") or os.getenv("WORKER_TOKEN_FILE"):
+        raise ValueError(
+            "Shared-token worker listener was removed; configure scoped credentials"
         )
+    listeners = []
     public_address = os.getenv("WORKER_PUBLIC_GRPC_ADDR", "")
     if public_address:
         listeners.append(

@@ -87,10 +87,8 @@ class WorkerCredentialTests(unittest.TestCase):
 
 
 class WorkerListenerTests(unittest.TestCase):
-    def test_public_listener_never_accepts_legacy_credentials(self):
+    def test_listener_only_accepts_individual_credentials(self):
         with tempfile.TemporaryDirectory() as temp:
-            token_path = Path(temp) / "legacy.token"
-            token_path.write_text("synthetic-legacy-token-with-at-least-32-characters")
             registry_path = Path(temp) / "registry.json"
             registry_path.write_text(json.dumps(registry()))
             ports = []
@@ -115,66 +113,78 @@ class WorkerListenerTests(unittest.TestCase):
                 patch.dict(
                     os.environ,
                     {
-                        "WORKER_GRPC_ADDR": "127.0.0.1:0",
-                        "WORKER_TOKEN_FILE": str(token_path),
                         "WORKER_PUBLIC_GRPC_ADDR": "127.0.0.1:0",
                         "WORKER_CREDENTIALS_FILE": str(registry_path),
                     },
+                    clear=True,
                 ),
                 patch("whisper.worker_api.grpc.server", side_effect=create),
             ):
                 servers = start_worker_apis(store)
             try:
-                for port, valid, invalid in (
-                    (ports[0], token_path.read_text(), CPU_TOKEN),
-                    (ports[1], CPU_TOKEN, token_path.read_text()),
-                ):
-                    with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
-                        method = rpc.WorkerServiceStub(channel).ReportAvailability
-                        request = pb.WorkerAvailabilityRequest(
-                            worker_id="wsl-cpu",
-                            instance_id="00000000-0000-0000-0000-000000000001",
-                            ready=True,
-                        )
-                        self.assertTrue(
-                            method(
-                                request,
-                                metadata=(("authorization", "Bearer " + valid),),
-                                timeout=5,
-                            ).accepted
-                        )
+                self.assertEqual(len(servers), 1)
+                with grpc.insecure_channel(f"127.0.0.1:{ports[0]}") as channel:
+                    method = rpc.WorkerServiceStub(channel).ReportAvailability
+                    request = pb.WorkerAvailabilityRequest(
+                        worker_id="wsl-cpu",
+                        instance_id="00000000-0000-0000-0000-000000000001",
+                        ready=True,
+                    )
+                    self.assertTrue(
+                        method(
+                            request,
+                            metadata=(("authorization", "Bearer " + CPU_TOKEN),),
+                            timeout=5,
+                        ).accepted
+                    )
+                    for token, code in (
+                        (GPU_TOKEN, grpc.StatusCode.PERMISSION_DENIED),
+                        (
+                            "synthetic-retired-shared-token-with-at-least-32-characters",
+                            grpc.StatusCode.UNAUTHENTICATED,
+                        ),
+                    ):
                         with self.assertRaises(grpc.RpcError) as error:
                             method(
                                 request,
-                                metadata=(("authorization", "Bearer " + invalid),),
+                                metadata=(("authorization", "Bearer " + token),),
                                 timeout=5,
                             )
-                        self.assertEqual(
-                            error.exception.code(), grpc.StatusCode.UNAUTHENTICATED
-                        )
+                        self.assertEqual(error.exception.code(), code)
             finally:
                 for server in servers:
                     server.stop(0).wait()
 
-    def test_invalid_public_registry_does_not_fall_back_to_private_token(self):
-        with tempfile.TemporaryDirectory() as temp:
-            token_path = Path(temp) / "legacy.token"
-            token_path.write_text("synthetic-legacy-token-with-at-least-32-characters")
+    def test_invalid_registry_fails_before_binding(self):
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "WORKER_PUBLIC_GRPC_ADDR": "127.0.0.1:0",
+                    "WORKER_CREDENTIALS_FILE": "/missing/synthetic.json",
+                },
+                clear=True,
+            ),
+            patch("whisper.worker_api.grpc.server") as factory,
+            self.assertRaisesRegex(ValueError, "Invalid worker credential registry"),
+        ):
+            start_worker_apis(None)
+        factory.assert_not_called()
+
+    def test_removed_shared_listener_fails_closed(self):
+        for key in ("WORKER_GRPC_ADDR", "WORKER_TOKEN_FILE"):
             with (
-                patch.dict(
-                    os.environ,
-                    {
-                        "WORKER_GRPC_ADDR": "127.0.0.1:0",
-                        "WORKER_TOKEN_FILE": str(token_path),
-                        "WORKER_PUBLIC_GRPC_ADDR": "127.0.0.1:0",
-                        "WORKER_CREDENTIALS_FILE": str(Path(temp) / "missing.json"),
-                    },
-                ),
+                self.subTest(key=key),
+                patch.dict(os.environ, {key: "synthetic"}, clear=True),
                 self.assertRaisesRegex(
-                    ValueError, "Invalid worker credential registry"
+                    ValueError, "Shared-token worker listener was removed"
                 ),
             ):
                 start_worker_apis(None)
+
+    def test_no_listener_without_explicit_address(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(start_worker_apis(None), [])
 
 
 if __name__ == "__main__":

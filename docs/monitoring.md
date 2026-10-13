@@ -12,7 +12,7 @@ The transcriber repository owns two Grafana dashboards:
 `scripts/render_dashboards.py` is the editable source. `make dashboards`
 regenerates `monitoring/grafana/*.json`; do not edit the JSON by hand.
 `make monitoring-check` checks the generated files and parses all panel PromQL
-with the pinned Prometheus tool from `versions.mk`. CI runs this through
+with the pinned Prometheus tool from `Makefiles/versions.mk`. CI runs this through
 `make check` before deployment.
 
 ## Delivery

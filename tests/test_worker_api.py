@@ -1,5 +1,6 @@
 """Real gRPC + PostgreSQL tests, always in a random isolated schema."""
 
+import hashlib
 import os
 import tempfile
 import threading
@@ -62,13 +63,30 @@ class WorkerAPITests(unittest.TestCase):
         self.store.init_schema()
         self.server = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
         rpc.add_WorkerServiceServicer_to_server(
-            WorkerServicer(self.store, TOKEN), self.server
+            WorkerServicer(
+                self.store,
+                WorkerCredentials(
+                    {
+                        worker: hashlib.sha256(self.token(worker).encode()).hexdigest()
+                        for worker in (
+                            "pilot-worker",
+                            "mac-primary",
+                            "wsl-gpu",
+                            "wsl-cpu",
+                            "unlisted-worker",
+                            "server-fallback",
+                            "local-pilot",
+                        )
+                    }
+                ),
+            ),
+            self.server,
         )
         self.port = self.server.add_insecure_port("127.0.0.1:0")
         self.server.start()
         self.channel = grpc.insecure_channel(f"127.0.0.1:{self.port}")
         self.stub = rpc.WorkerServiceStub(self.channel)
-        self.metadata = (("authorization", "Bearer " + TOKEN),)
+        self.metadata = (("authorization", "Bearer " + self.token("pilot-worker")),)
         self.client_server = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
         rpc.add_TranscriptionServiceServicer_to_server(
             TranscriptionServicer(self.store), self.client_server
@@ -88,8 +106,31 @@ class WorkerAPITests(unittest.TestCase):
             conn.execute(f"DROP SCHEMA {self.schema} CASCADE")
         self.tmp.cleanup()
 
+    @staticmethod
+    def token(worker):
+        return TOKEN + "-" + worker
+
     def rpc(self, method, request):
-        return method(request, timeout=5, metadata=self.metadata)
+        worker = (
+            getattr(request, "worker_id", "")
+            or getattr(request, "lease_token", "").split("/")[0]
+        )
+        worker = (
+            worker
+            if worker
+            in {
+                "pilot-worker",
+                "mac-primary",
+                "wsl-gpu",
+                "wsl-cpu",
+                "unlisted-worker",
+                "server-fallback",
+                "local-pilot",
+            }
+            else "pilot-worker"
+        )
+        metadata = (("authorization", "Bearer " + self.token(worker)),)
+        return method(request, timeout=5, metadata=metadata)
 
     def submit(self, audio=b"synthetic audio"):
         job, path = self.store.create_job(
@@ -250,7 +291,10 @@ class WorkerAPITests(unittest.TestCase):
                 with self.assertRaises(grpc.RpcError) as error:
                     self.report_availability(worker_id, instance_id)
                 self.assertEqual(
-                    error.exception.code(), grpc.StatusCode.INVALID_ARGUMENT
+                    error.exception.code(),
+                    grpc.StatusCode.INVALID_ARGUMENT
+                    if worker_id == "mac-primary"
+                    else grpc.StatusCode.PERMISSION_DENIED,
                 )
         with self.assertRaises(grpc.RpcError) as error:
             self.claim_primary("mac-primary", "not-a-uuid")
@@ -562,10 +606,10 @@ class WorkerAPITests(unittest.TestCase):
                 raise RuntimeError("synthetic-sensitive-content")
 
         worker = RemoteWorker(
-            Config(f"127.0.0.1:{self.port}", "/unused", "pilot"),
+            Config(f"127.0.0.1:{self.port}", "/unused", "pilot-worker"),
             self.stub,
             BrokenEngine(),
-            TOKEN,
+            self.token("pilot-worker"),
         )
         worker.process(self.claim())
         job = self.store.get_job(job_id)
@@ -955,10 +999,10 @@ class WorkerAPITests(unittest.TestCase):
             )
         job_id = self.submit(Path(audio_file).read_bytes())
         worker = RemoteWorker(
-            Config(f"127.0.0.1:{self.port}", "/unused", "mac-pilot"),
+            Config(f"127.0.0.1:{self.port}", "/unused", "pilot-worker"),
             self.stub,
             self.engine,
-            TOKEN,
+            self.token("pilot-worker"),
         )
         worker.process(self.claim())
         job = self.store.get_job(job_id)

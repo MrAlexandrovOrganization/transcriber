@@ -40,7 +40,7 @@ worker IDs without exposing file contents in errors. It is read at startup.
 A token permits only its worker ID in Claim/ReportAvailability, and only that
 worker's lease tokens in Download/Heartbeat/Complete/Fail. Lease ownership and
 expiry are additionally enforced by PostgreSQL. Workers share no raw secret.
-The public listener never falls back to the legacy shared-token listener.
+The listener accepts only individual credentials; there is no shared-token listener.
 
 For rotation, securely provision the new token file and update its registry
 hash; recreate ingress with `make restart-worker-api` in server mode, then
@@ -57,7 +57,6 @@ Coordinator `.env`:
 ```dotenv
 TRANSCRIBER_ROLE=server
 WORKER_TLS_ENABLED=1
-WORKER_API_ENABLED=0
 WORKER_CREDENTIALS_PATH=/home/your-login/.config/transcriber/worker-credentials.json
 ```
 
@@ -70,7 +69,6 @@ Worker `.env`:
 
 ```dotenv
 TRANSCRIBER_ROLE=workers
-WORKER_TRANSPORT=tls
 REMOTE_WORKER_ENDPOINT=workers.example.com:443
 CPU_WORKER_TOKEN_PATH=/home/your-login/.config/transcriber/cpu.token
 GPU_WORKER_TOKEN_PATH=/home/your-login/.config/transcriber/gpu.token
@@ -81,31 +79,35 @@ autodeploy settings. Only enabled roles need a token file. Run `make up` to
 apply transport/configuration changes. Each selected worker has a separate
 ordinary Docker network namespace and token mount. No ports are published.
 
-## Migration and rollback
+## Upgrade and rollback
 
-1. Provision the registry and individual token files without logging secrets.
-2. Deploy Caddy's route/network through its Git/CI workflow; check TLS.
-3. Enable `WORKER_TLS_ENABLED=1` and deploy the coordinator through Git/CI.
-   Temporarily retain `WORKER_API_ENABLED=1` for existing SSH workers. The two
-   listeners have separate credentials; the legacy token cannot use public RPCs.
-4. Check there are no in-flight jobs to interrupt, or drain workers with SIGUSR1
-   and wait for `/tmp/worker-drained`. Stop the autodeploy controller during the
-   topology change. After draining, explicitly stop the old inference containers
-   before running Compose: they still reference the tunnel's network namespace.
-   Update the bootstrap checkout and per-device `.env`; `make up` recreates
-   workers and removes the orphan tunnel container. Keep the coordinator's
-   permanent fallback worker running during this brief per-device transition.
-5. Verify TLS registration, identity rejection, readiness and unchanged model
-   settings on both devices. Disable `WORKER_API_ENABLED` and recreate ingress
-   with `make restart-worker-api`; confirm port 50055 is no longer published.
+Server deployments use `compose/server.yml` plus `compose/worker-tls.yml` when
+`WORKER_TLS_ENABLED=1`. Mac/WSL use `compose/workers.yml`, plus
+`compose/workers.autodeploy.yml` when image updates are enabled. Run the unchanged
+Make commands from the project root. Keep project names, volumes, cache paths,
+worker IDs and individual credential files unchanged.
 
-Protect backups of `.env` and credentials outside Git. Do not delete model
-caches, updater state, database volumes or unrelated SSH keys during migration.
-For explicit rollback, enable the legacy loopback overlay and set worker
-`WORKER_TRANSPORT=ssh`, `REMOTE_WORKER_ENDPOINT=127.0.0.1:50055`, the old token
-paths and SSH settings, then `make up`. Normal TLS deployments do not use that
-compatibility overlay. Changing Compose topology is a bootstrap operation;
-subsequent inference-code releases still use the existing automatic image rollout.
+The retired SSH overlay, shared-token loopback listener and native machine
+launchers have been removed. Remove obsolete `WORKER_API_ENABLED`,
+`WORKER_TRANSPORT` and `SSH_*` selectors from machine `.env` files.
+`WORKER_GRPC_ADDR`/`WORKER_TOKEN_FILE` on ingress now fail startup rather than
+silently accepting obsolete authentication. Workers reject plaintext connections
+outside loopback, even if an old insecure override is set. Loopback plaintext
+with scoped credentials remains available only for isolated tests/pilots.
+
+Topology and updater bootstrap changes require updating the checkout and
+running `make up` on each device. Stop the updater and drain inference workers
+with `SIGUSR1`; wait for `/tmp/worker-drained` before replacing containers.
+The worker finishes its current task and renews its lease while draining.
+Never force a busy replacement; a disconnected attempt otherwise waits for
+lease expiry and consumes a retry. Resume a retained drained worker with
+`SIGUSR2` if the upgrade is aborted.
+
+Rollback uses a known good Git revision and approved image digests **with TLS
+and individual credentials retained**. The image updater already restores the
+previous container if a new image fails readiness. Do not restore the retired
+SSH topology. Protect backups of configuration/credentials outside Git and
+preserve database, job, model and updater-state volumes.
 
 ## Checks
 

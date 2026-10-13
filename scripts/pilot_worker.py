@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import json
 import math
 import os
@@ -207,6 +208,20 @@ def run_pilot(audio: Path, timeout: float, expect: str) -> dict:
                 )
                 with os.fdopen(token_fd, "w") as file:
                     file.write(secrets.token_urlsafe(48))
+                registry_path = Path(temp) / "worker-credentials.json"
+                registry_path.write_text(
+                    json.dumps(
+                        {
+                            "version": 1,
+                            "workers": {
+                                "local-native-pilot": hashlib.sha256(
+                                    token_path.read_text().encode()
+                                ).hexdigest()
+                            },
+                        }
+                    )
+                )
+                registry_path.chmod(0o600)
                 jobs = Path(temp) / "jobs"
                 jobs.mkdir(mode=0o700)
                 ingress_port = free_port()
@@ -219,8 +234,8 @@ def run_pilot(audio: Path, timeout: float, expect: str) -> dict:
                     "SERVICE_ROLE": "ingress",
                     "GRPC_PORT": str(ingress_port),
                     "GRPC_BIND_HOST": "127.0.0.1",
-                    "WORKER_GRPC_ADDR": f"127.0.0.1:{worker_port}",
-                    "WORKER_TOKEN_FILE": str(token_path),
+                    "WORKER_PUBLIC_GRPC_ADDR": f"127.0.0.1:{worker_port}",
+                    "WORKER_CREDENTIALS_FILE": str(registry_path),
                     "JOB_STORAGE_DIR": str(jobs),
                     "JOB_LEASE_SECONDS": "15",
                     "JOB_MAX_ATTEMPTS": "3",
@@ -287,6 +302,7 @@ def run_pilot(audio: Path, timeout: float, expect: str) -> dict:
                 worker_env = base_env | {
                     "REMOTE_WORKER_ENDPOINT": f"127.0.0.1:{worker_port}",
                     "REMOTE_WORKER_TOKEN_FILE": str(token_path),
+                    "REMOTE_WORKER_TLS": "0",
                     "WORKER_ID": "local-native-pilot",
                     "WORKER_POLL_INTERVAL_S": "1",
                     "REMOTE_WORKER_RPC_TIMEOUT_S": "5",

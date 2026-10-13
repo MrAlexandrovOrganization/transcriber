@@ -21,10 +21,6 @@ class WorkerCredentials:
         self._hashes = dict(hashes)
 
     @classmethod
-    def legacy(cls, token):
-        return cls({"": hashlib.sha256(token.encode("ascii")).hexdigest()})
-
-    @classmethod
     def from_file(cls, path):
         try:
             with Path(path).open("rb") as stream:

@@ -358,12 +358,11 @@ class RemoteWorkerTests(unittest.TestCase):
         self.assertGreaterEqual(delays[0], 1.6)
         self.assertLessEqual(delays[0], 2.4)
 
-    def test_plaintext_only_loopback_without_explicit_override(self):
+    def test_plaintext_only_loopback_and_tls_for_remote_workers(self):
         for endpoint in ("localhost:50055", "127.0.0.1:50055", "[::1]:50055"):
             Config(endpoint, "/test", "test")
         with self.assertRaises(ValueError):
             Config("100.64.0.1:50055", "/test", "test")
-        Config("100.64.0.1:50055", "/test", "test", allow_insecure=True)
         Config("worker.example:443", "/test", "test", tls=True)
         for endpoint in (
             "user:pass@localhost:50055",

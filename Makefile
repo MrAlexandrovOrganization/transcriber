@@ -9,46 +9,38 @@ WORKER_REGISTRY ?= ghcr.io/mralexandrovorganization/transcriber
 export WORKER_REGISTRY
 WORKER_RELEASE_FILE ?= .worker-release.env
 WORKER_RELEASE_ENV = $(if $(wildcard $(WORKER_RELEASE_FILE)),--env-file "$(WORKER_RELEASE_FILE)")
+# Reject obsolete SSH configurations instead of silently changing transport.
 WORKER_TRANSPORT ?= $(or $(shell sed -n 's/^WORKER_TRANSPORT=//p' $(ENV_FILE) 2>/dev/null),tls)
 WORKER_TLS_ENABLED ?= $(shell sed -n 's/^WORKER_TLS_ENABLED=//p' $(ENV_FILE) 2>/dev/null)
-WORKER_API_ENABLED ?= $(shell sed -n 's/^WORKER_API_ENABLED=//p' $(ENV_FILE) 2>/dev/null)
 ifneq ($(filter-out server workers,$(strip $(TRANSCRIBER_ROLE))),)
 $(error TRANSCRIBER_ROLE must be an unquoted server or workers)
 endif
-ifneq ($(filter-out 0 1,$(strip $(WORKER_API_ENABLED))),)
-$(error WORKER_API_ENABLED must be an unquoted 0 or 1)
-endif
-ifneq ($(filter-out tls ssh,$(strip $(WORKER_TRANSPORT))),)
-$(error WORKER_TRANSPORT must be an unquoted tls or ssh)
+ifneq ($(filter-out tls,$(strip $(WORKER_TRANSPORT))),)
+$(error SSH worker transport was removed; use TLS)
 endif
 ifneq ($(filter-out 0 1,$(strip $(WORKER_TLS_ENABLED))),)
 $(error WORKER_TLS_ENABLED must be an unquoted 0 or 1)
 endif
-COMPOSE_FILES = -f docker-compose.yml
+# Keep paths, default project name and volumes anchored to the checkout root.
+COMPOSE_FILES = -f compose/server.yml
 ifeq ($(strip $(TRANSCRIBER_ROLE)),workers)
-COMPOSE_FILES = -f compose.workers.yml
-ifeq ($(strip $(WORKER_TRANSPORT)),ssh)
-COMPOSE_FILES += -f compose.workers.ssh.yml
-endif
+COMPOSE_FILES = -f compose/workers.yml
 ifeq ($(strip $(WORKER_AUTODEPLOY)),1)
-COMPOSE_FILES += -f compose.workers.autodeploy.yml
+COMPOSE_FILES += -f compose/workers.autodeploy.yml
 else
 WORKER_RELEASE_ENV =
 endif
 else
-ifeq ($(strip $(WORKER_API_ENABLED)),1)
-COMPOSE_FILES += -f compose.worker-api.yml
-endif
 ifeq ($(strip $(WORKER_TLS_ENABLED)),1)
-COMPOSE_FILES += -f compose.worker-tls.yml
+COMPOSE_FILES += -f compose/worker-tls.yml
 endif
 endif
-DOCKER_COMPOSE = docker compose $(WORKER_RELEASE_ENV) $(if $(wildcard $(ENV_FILE)),--env-file "$(ENV_FILE)") $(COMPOSE_FILES)
+DOCKER_COMPOSE = docker compose --project-directory "$(CURDIR)" $(WORKER_RELEASE_ENV) $(if $(wildcard $(ENV_FILE)),--env-file "$(ENV_FILE)") $(COMPOSE_FILES)
 # Timestamped attestations change local image IDs even for a cached build,
 # causing an unnecessary Compose restart on every make up.
 BUILDX_NO_DEFAULT_ATTESTATIONS ?= 1
 export BUILDX_NO_DEFAULT_ATTESTATIONS
-include versions.mk
+include Makefiles/versions.mk
 
 .PHONY: install
 install:
@@ -184,16 +176,10 @@ ifeq ($(strip $(TRANSCRIBER_ROLE)),workers)
 	$(DOCKER_COMPOSE) config --format json | python3 scripts/validate_workers.py
 endif
 
-worker-api-config-check:
-	docker compose -f docker-compose.yml -f compose.worker-api.yml config --quiet
-
-up-worker-api: worker-api-config-check
-	$(MAKE) WORKER_API_ENABLED=1 up
-
 config-check-examples:
 	$(MAKE) ENV_FILE=.env.mac.example TRANSCRIBER_ROLE=workers config-check
 	$(MAKE) ENV_FILE=.env.wsl.example TRANSCRIBER_ROLE=workers config-check
-	$(MAKE) ENV_FILE=.env.server.example TRANSCRIBER_ROLE=server WORKER_API_ENABLED=0 WORKER_TLS_ENABLED=1 config-check
+	$(MAKE) ENV_FILE=.env.server.example TRANSCRIBER_ROLE=server WORKER_TLS_ENABLED=1 config-check
 
 check: proto-gen proto-check config-check config-check-examples monitoring-check
 	poetry run ruff check whisper tests scripts
@@ -217,7 +203,7 @@ pilot: proto-gen
 ci-versions:
 	@printf 'python=%s\npoetry=%s\nbuf=%s\npostgres=%s\nbuildx=%s\n' '$(PYTHON_VERSION)' '$(POETRY_VERSION)' '$(BUF_VERSION)' '$(POSTGRES_VERSION)' '$(BUILDX_VERSION)'
 
-.PHONY: compose-build build-workers config-check-examples ps install-poetry proto-gen proto-check test test-integration test-db-up test-db-down config-check worker-api-config-check up-worker-api check run migrate run-remote-worker pilot ci-versions
+.PHONY: compose-build build-workers config-check-examples ps install-poetry proto-gen proto-check test test-integration test-db-up test-db-down config-check check run migrate run-remote-worker pilot ci-versions
 
 # CI and local bootstrap use the same publishing/resolution code.
 SOURCE_REVISION ?= $(shell git rev-parse HEAD)

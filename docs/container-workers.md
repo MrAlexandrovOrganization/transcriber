@@ -17,8 +17,7 @@ Docker Engine/Colima/Docker Desktop still needs to be running.
 
 Copy the relevant example to `.env` once, then edit its machine-specific values.
 Do not overwrite an existing `.env`. `TRANSCRIBER_ROLE=server|workers` and the
-server's `WORKER_TLS_ENABLED=0|1` / `WORKER_API_ENABLED=0|1` and
-`WORKER_TRANSPORT=tls|ssh` must be unquoted assignments at the beginning of
+server's `WORKER_TLS_ENABLED=0|1` must be unquoted assignments at the beginning of
 their lines. Make reads only these selectors, never sources the file as shell
 code. Compose reads the remaining values. `ENV_FILE=/path/to/file` can select an
 alternative file explicitly. Environment/Make overrides take precedence.
@@ -41,7 +40,6 @@ GPU_COMPUTE_TYPE=int8_float16
 GPU_THREADS=2
 GPU_CPU_LIMIT=1.5
 GPU_MEMORY_LIMIT=3g
-WORKER_TRANSPORT=tls
 REMOTE_WORKER_ENDPOINT=workers.example.com:443
 CPU_WORKER_TOKEN_PATH=/home/your-login/.config/transcriber/cpu.token
 GPU_WORKER_TOKEN_PATH=/home/your-login/.config/transcriber/gpu.token
@@ -93,13 +91,10 @@ not key/token contents. Missing bind sources fail rather than becoming empty
 directories. Bind propagation is explicitly `rprivate`, including for credential
 files, for compatibility with the tested Docker Desktop WSL integration.
 See [TLS and per-worker credentials](worker-tls.md) for provisioning, rotation,
-revocation and migration. The explicit `WORKER_TRANSPORT=ssh` compatibility
-overlay is for migration/rollback only, and requires the old SSH paths plus
-`REMOTE_WORKER_ENDPOINT=127.0.0.1:50055`. It is not used on migrated devices.
+revocation and upgrades. TLS is the only supported remote transport.
 
 CPU and CUDA targets share the same Python application and Poetry lockfile.
-The CUDA target adds cuBLAS/cuDNN wheels pinned only in `versions.mk`. The legacy SSH
-target contains OpenSSH and the small forwarding entry point. Containers are
+The CUDA target adds cuBLAS/cuDNN wheels pinned only in `Makefiles/versions.mk`. Containers are
 non-root with dropped capabilities, read-only root filesystems and bounded
 temporary storage/logs. Model cache is persistent and read-only; temporary audio
 is disposable. The coordinator remains responsible for durable jobs/results.
@@ -144,8 +139,7 @@ an asleep/offline device processing. See [priority and leases](worker-priority.m
 
 The existing server role is selected by default for backward compatibility.
 `WORKER_TLS_ENABLED=1` enables the Caddy network and scoped Worker API.
-`WORKER_API_ENABLED=1` additionally enables the legacy loopback listener only
-during migration; normal TLS deployments set it to zero. `SERVER_WORKER_MODEL`, `SERVER_WORKER_COMPUTE_TYPE`,
+`SERVER_WORKER_MODEL`, `SERVER_WORKER_COMPUTE_TYPE`,
 `SERVER_WORKER_CPU_THREADS`, `SERVER_WORKER_CPU_LIMIT` and
 `SERVER_WORKER_MEMORY_LIMIT` configure fallback inference independently.
 Existing volumes and network aliases are preserved.
@@ -160,21 +154,20 @@ With `WORKER_AUTODEPLOY=1`, Mac/WSL inference containers follow approved public
 GHCR releases through a local updater container, including after being offline.
 See [automatic deployment, drain and rollback](worker-autodeploy.md).
 
-## Migrate an existing native worker
+## Upgrading existing deployments
 
-1. Provision `.env` and files, build images, and validate model/inference with
-   synthetic audio outside the real queue. Keep the native worker running until
-   the container prerequisites succeed.
-2. Check for in-flight work. Stop the reviewed native installation using
-   `scripts/mac_worker.py stop` or `scripts/wsl_worker.py stop`.
-3. On Mac, archive the two reviewed LaunchAgent plist files outside
-   `~/Library/LaunchAgents` so they cannot return at next login. WSL's stop
-   disables its target; retain its files for rollback.
-4. Run `make up`, inspect `make ps`/logs and confirm fresh availability for the
-   expected worker IDs in the coordinator database. Avoid duplicate native and
-   container workers with the same configured ID.
-5. If startup fails, stop the container project and restore/start the archived
-   native installation. Keep tokens, model caches and durable server data.
+Update the bootstrap checkout to the approved revision and use `make up`.
+Keep `COMPOSE_PROJECT_NAME`, models, token paths and cache paths unchanged.
+Compose files now live under `compose/`; Make anchors all relative paths to the
+checkout root. Remove obsolete `WORKER_API_ENABLED`, `WORKER_TRANSPORT` and
+`SSH_*` settings from the machine's `.env`. Remove `WORKER_GRPC_ADDR` and
+`WORKER_TOKEN_FILE` from custom ingress environments: startup rejects those
+retired settings. Do not remove active per-worker token files.
+
+Old SSH launchers/Compose overlays are no longer shipped. Existing native
+LaunchAgents/systemd units must already be disabled before this upgrade; container
+and native installations must never run with the same worker ID. The current
+supported lifecycle is Docker Compose on every device.
 
 Official references: [Compose GPU access](https://docs.docker.com/compose/how-tos/gpu-support/),
 [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).

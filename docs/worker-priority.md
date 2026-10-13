@@ -41,10 +41,10 @@ readiness by selecting worker ID, `ready_until > now()`, and expiry from
 readiness check. Job claim/completion logs identify the owning worker/operation.
 The registry is not historical monitoring or a proof of inference quality.
 
-Worker IDs are trusted identities within the existing shared bearer-token pool;
-a trusted token holder could report another allowed ID. Keep the token protected
-and the API on loopback behind SSH. Per-device credentials/revocation are a later
-hardening step.
+Worker IDs are bound to individual bearer-token hashes by the coordinator.
+A token can report/claim only its worker ID and act only on leases owned by that
+identity. Workers connect through Caddy with gRPC/TLS. See
+[credentials and transport](worker-tls.md).
 
 Rollout updates ingress and permanent worker together through Git/CI/CD, then
 updates remote worker containers on the same published revision with `make up`.

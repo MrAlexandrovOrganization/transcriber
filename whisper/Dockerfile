@@ -56,18 +56,6 @@ RUN pip install --no-cache-dir --no-deps \
 ENV LD_LIBRARY_PATH=/usr/local/lib/python${PYTHON_VERSION}/site-packages/nvidia/cublas/lib:/usr/local/lib/python${PYTHON_VERSION}/site-packages/nvidia/cudnn/lib
 USER 1000:1000
 
-FROM python:${PYTHON_VERSION}-slim AS tunnel
-ARG TUNNEL_UID
-ARG TUNNEL_GID
-RUN apt-get update && apt-get install -y --no-install-recommends openssh-client \
-    && rm -rf /var/lib/apt/lists/* \
-    && (getent group ${TUNNEL_GID} || groupadd -g ${TUNNEL_GID} tunnel) \
-    && useradd -m -u ${TUNNEL_UID} -g ${TUNNEL_GID} tunnel
-WORKDIR /app
-COPY whisper/ssh_tunnel.py ./ssh_tunnel.py
-USER tunnel
-CMD ["python", "ssh_tunnel.py"]
-
 # Bootstrap infrastructure is built locally; only inference images are reconciled.
 FROM python:${PYTHON_VERSION}-slim AS updater
 WORKDIR /app
