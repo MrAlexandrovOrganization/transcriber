@@ -1,18 +1,21 @@
 # Compose >=2.24.4. The .env remains the authority for profiles/models/limits.
 services:
   worker-cpu:
+    container_name: "${CONTAINER_NAME_PREFIX:-}transcriber-worker-cpu"
     build: !reset null
     image: ${WORKER_CPU_IMAGE:?Run make worker-release first}
     labels:
       io.transcriber.autodeploy: "true"
       io.transcriber.worker-role: cpu
   worker-gpu:
+    container_name: "${CONTAINER_NAME_PREFIX:-}transcriber-worker-gpu"
     build: !reset null
     image: ${WORKER_GPU_IMAGE:?Run make worker-release first}
     labels:
       io.transcriber.autodeploy: "true"
       io.transcriber.worker-role: gpu
   worker-updater:
+    container_name: "${CONTAINER_NAME_PREFIX:-}transcriber-worker-updater"
     build:
       context: .
       dockerfile: whisper/Dockerfile

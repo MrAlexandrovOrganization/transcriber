@@ -1,6 +1,7 @@
 # Caddy terminates TLS; this listener is reachable only on the dedicated network.
 services:
   whisper-ingress:
+    container_name: "${CONTAINER_NAME_PREFIX:-}transcriber-ingress"
     environment:
       WORKER_PUBLIC_GRPC_ADDR: "transcriber-worker-api:50056"
       WORKER_CREDENTIALS_FILE: /run/secrets/worker-credentials

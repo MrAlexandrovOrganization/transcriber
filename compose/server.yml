@@ -21,6 +21,7 @@ networks:
 
 services:
   postgres:
+    container_name: "${CONTAINER_NAME_PREFIX:-}transcriber-postgres"
     image: postgres:${POSTGRES_VERSION:?Run via make}
     environment:
       POSTGRES_DB: transcriber
@@ -46,6 +47,7 @@ services:
           cpus: "0.1"
 
   whisper-ingress:
+    container_name: "${CONTAINER_NAME_PREFIX:-}transcriber-ingress"
     build:
       context: .
       dockerfile: whisper/Dockerfile
@@ -101,6 +103,7 @@ services:
           cpus: "0.1"
 
   whisper-worker:
+    container_name: "${CONTAINER_NAME_PREFIX:-}transcriber-worker"
     build:
       context: .
       dockerfile: whisper/Dockerfile

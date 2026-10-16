@@ -53,6 +53,7 @@ x-worker: &worker
 
 services:
   worker-cpu:
+    container_name: "${CONTAINER_NAME_PREFIX:-}transcriber-worker-cpu"
     <<: *worker
     profiles: [cpu]
     build:
@@ -80,6 +81,7 @@ services:
     pids_limit: 96
 
   worker-gpu:
+    container_name: "${CONTAINER_NAME_PREFIX:-}transcriber-worker-gpu"
     <<: *worker
     profiles: [gpu]
     build:
