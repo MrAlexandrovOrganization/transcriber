@@ -33,7 +33,7 @@ HISTOGRAMS = {
 }
 
 
-def render_metrics(snapshot: dict, workers: dict[str, str]) -> bytes:
+def render_metrics(snapshot: dict, workers: dict[str, str], policies=None) -> bytes:
     """Only configured worker IDs are labels; unlisted IDs collapse to 'other'."""
     lines: list[str] = []
 
@@ -98,7 +98,7 @@ def render_metrics(snapshot: dict, workers: dict[str, str]) -> bytes:
     worker_metrics = {
         "worker_online": "At least one unexpired ready report exists for this worker ID.",
         "worker_state": "Worker state: 0 offline, 1 ready and idle, 2 ready and busy. Busy means a valid job lease.",
-        "worker_instances": "Number of currently ready process instances, useful for detecting duplicates.",
+        "worker_instances": "Number of currently ready execution slots; multiple slots may share one process/model.",
         "worker_last_report_age_seconds": "Age of the last availability report, NaN if never observed.",
         "worker_active_jobs": "Jobs currently held by this worker with an unexpired lease.",
         "worker_progress_percent": "Mean reported progress of currently leased jobs, zero when idle.",
@@ -106,6 +106,20 @@ def render_metrics(snapshot: dict, workers: dict[str, str]) -> bytes:
     }
     for name, help_text in worker_metrics.items():
         definition(name, "gauge", help_text)
+    if policies:
+        definition(
+            "worker_priority", "gauge", "Configured pool priority; lower numbers win."
+        )
+        definition(
+            "worker_capacity",
+            "gauge",
+            "Configured maximum concurrent jobs for the pool.",
+        )
+        definition(
+            "worker_free_slots",
+            "gauge",
+            "Ready idle slots with fresh work requests, bounded by remaining pool capacity.",
+        )
     for worker_id, role in sorted(workers.items()):
         row = availability.get(worker_id, {})
         active = running.get(worker_id, {})
@@ -121,6 +135,20 @@ def render_metrics(snapshot: dict, workers: dict[str, str]) -> bytes:
         }
         for name, value in values.items():
             sample(name, value, worker_id=worker_id, worker_role=role)
+        if policies and worker_id in policies:
+            policy = policies[worker_id]
+            for name, value in {
+                "worker_priority": policy["priority"],
+                "worker_capacity": policy["max_concurrency"],
+                "worker_free_slots": max(
+                    0,
+                    min(
+                        row.get("idle_slots", 0),
+                        policy["max_concurrency"] - active.get("active", 0),
+                    ),
+                ),
+            }.items():
+                sample(name, value, worker_id=worker_id, worker_role=role)
 
     # Pre-initialize series so idle dashboards show zero, rather than No data.
     totals = {
@@ -183,7 +211,7 @@ class MetricsEndpoint:
             for w in os.getenv("PREFERRED_WORKER_IDS", "").split(",")
             if w.strip()
         ]
-        self.workers = dict.fromkeys(preferred, "preferred")
+        self.workers = dict.fromkeys(store.worker_policies or preferred, "preferred")
         self.workers[os.getenv("FALLBACK_WORKER_ID", "server-fallback")] = "fallback"
         if len(self.workers) > 129 or any(
             worker in {"ingress", "other"}
@@ -204,7 +232,9 @@ class MetricsEndpoint:
                 try:
                     if time.monotonic() - endpoint._cached_at >= 5:
                         endpoint._payload = render_metrics(
-                            store.metrics_snapshot(), endpoint.workers
+                            store.metrics_snapshot(),
+                            endpoint.workers,
+                            store.worker_policies,
                         )
                         endpoint._cached_at = time.monotonic()
                     self.send_response(200)

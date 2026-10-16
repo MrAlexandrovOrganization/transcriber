@@ -1,6 +1,6 @@
 WITH report AS (
-    INSERT INTO worker_availability (worker_id, instance_id, ready_until, reported_at)
-    VALUES (%s, %s, NOW() + (%s * INTERVAL '1 second'), NOW())
+    INSERT INTO worker_availability (worker_id, instance_id, ready_until, reported_at, demand_until)
+    VALUES (%s, %s, NOW() + (%s * INTERVAL '1 second'), NOW(), NOW() + (%s * INTERVAL '1 second'))
     ON CONFLICT (worker_id, instance_id) DO UPDATE
     SET ready_until = EXCLUDED.ready_until, reported_at = EXCLUDED.reported_at
     RETURNING worker_id, reported_at

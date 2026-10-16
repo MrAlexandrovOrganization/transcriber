@@ -6,7 +6,7 @@ The transcriber repository owns two Grafana dashboards:
   job, valid active leases, completion throughput, failures/retries, latency,
   expired leases, and retained results awaiting client Ack.
 - `/d/transcriber-workers`: worker selector, ready/idle/busy timeline,
-  availability percentage, last report age, duplicate process instances,
+  availability percentage, last report age, ready execution slots,
   progress, current attempt age, throughput and successful-attempt P95.
 
 `scripts/render_dashboards.py` is the editable source. `make dashboards`
@@ -36,10 +36,13 @@ Python launches. The datasource UID is the existing `prometheus`.
 ## Meaning and limitations
 
 - Availability comes from the coordinator's persisted ready reports. Any ready
-  process instance makes its worker ID online until the configured TTL expires
+  execution slot makes its worker ID online until the configured TTL expires
   (90 seconds by default). Readiness begins after model load. The permanent
   fallback reports independently during synchronous inference. Its reports do
-  not suppress fallback claiming: only `PREFERRED_WORKER_IDS` does that.
+  not by themselves suppress fallback claiming. `WORKER_POLICIES` selects the
+  best free tier, including fallback; an empty policy retains legacy preferred
+  worker gating. `worker_instances` counts slots, not OS processes. Priority,
+  capacity and free-slot gauges are emitted when priorities are configured.
 - Busy means the worker owns a valid lease, not proof that inference is making
   progress. The lease counter and progress panels help distinguish this.
 - Offline Mac/WSL is expected. Missing exporter/Prometheus observations are
@@ -65,8 +68,8 @@ Python launches. The datasource UID is the existing `prometheus`.
 - Results awaiting Ack measure client durable receipt, not Telegram delivery.
   Notifications/outbox and Telegram delivery metrics require instrumentation in
   the consuming bot and are not inferred from transcriber completion.
-- Last report age survives per-process availability cleanup. Worker IDs are
-  configured preferred IDs plus `FALLBACK_WORKER_ID` (default `server-fallback`).
+- Last report age survives per-slot availability cleanup. Worker IDs come from
+  `WORKER_POLICIES` (or legacy preferred IDs) plus `FALLBACK_WORKER_ID` (default `server-fallback`).
   Unlisted observation IDs aggregate under `other`; no per-job/user/error-text
   labels, audio, transcription text, tokens or input paths are exported.
 - Remote RAM, VRAM, model/revision metadata and host utilization are not

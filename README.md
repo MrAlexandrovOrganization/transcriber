@@ -38,8 +38,9 @@ The directory move does not require editing machine `.env` files.
 - A worker stores the final result before marking the job `done`; durable clients
   can separately acknowledge receipt with `Ack`.
 - If a worker dies before lease renewal, the job becomes claimable again and is retried.
-- Mac/WSL remote workers are preferred; the permanent server worker claims only
-  while all preferred workers are unavailable. See [availability and priority](docs/worker-priority.md).
+- Coordinator `WORKER_POLICIES` selects the highest-priority free pool and caps
+  its concurrent jobs. CPU/GPU processes can run multiple slots sharing one model.
+  See [priorities, capacity and compatibility](docs/worker-priority.md).
 
 ## Local run
 
@@ -122,6 +123,9 @@ and ledger rather than reversing migrations.
 - `WORKER_POLL_INTERVAL_S`
 - `WHISPER_MODEL`
 - `WHISPER_CPU_THREADS`
+- `WORKER_CONCURRENCY` — parallel slots sharing one model; Compose uses
+  `CPU_CONCURRENCY`, `GPU_CONCURRENCY`, or `SERVER_WORKER_CONCURRENCY`
+- `WORKER_POLICIES`, `WORKER_DEMAND_TTL_S` — coordinator priorities and pool caps
 - `PREFERRED_WORKER_IDS`, `WORKER_AVAILABILITY_TTL_S`, `WORKER_FALLBACK`
 
 ## Remote workers

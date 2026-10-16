@@ -12,7 +12,7 @@ import grpc
 from proto import whisper_pb2 as pb
 from whisper.inference import InferenceStopped, TranscriptionResult
 from whisper.limits import MAX_RESULT_BYTES
-from whisper.remote_worker import Config, RemoteWorker, read_token
+from whisper.remote_worker import Config, RemoteWorker, RemoteWorkerPool, read_token
 from whisper.worker_health import healthy
 
 
@@ -104,6 +104,148 @@ def claim(**kwargs):
 
 
 class RemoteWorkerTests(unittest.TestCase):
+    def test_reporter_cannot_reregister_a_drained_slot(self):
+        stub = FakeStub()
+        worker = RemoteWorker(
+            config(), stub, None, "synthetic-worker-token-at-least-32-characters"
+        )
+        worker._report_availability(True)
+        worker._drained.set()
+        worker._report_availability(False)
+        worker._report_availability(True)  # Reporter that was already queued.
+        self.assertEqual([r.ready for r in stub.availability], [True, False, False])
+        worker._drained.clear()
+        worker._report_availability(True)
+        self.assertTrue(stub.availability[-1].ready)
+
+    def test_lost_lease_in_one_slot_does_not_stop_another_slot(self):
+        stub = FakeStub()
+        lock = threading.Lock()
+        assigned = set()
+        finished = threading.Event()
+        engine = FakeEngine(stub, wait=0.1)
+        pool = RemoteWorkerPool(
+            config(concurrency=2, poll_interval=0.01),
+            stub,
+            engine,
+            "synthetic-worker-token-at-least-32-characters",
+        )
+
+        def do_claim(request, **kwargs):
+            with lock:
+                if request.instance_id in assigned:
+                    return pb.WorkerClaimResponse()
+                index = len(assigned)
+                assigned.add(request.instance_id)
+                return claim(job_id=str(index), lease_token=str(index))
+
+        def heartbeat(request, **kwargs):
+            stub.heartbeats.append(request)
+            return pb.WorkerAck(accepted=request.lease_token != "0")
+
+        complete = stub.Complete
+
+        def do_complete(request, **kwargs):
+            result = complete(request, **kwargs)
+            finished.set()
+            return result
+
+        stub.Claim = do_claim
+        stub.Heartbeat = heartbeat
+        stub.Complete = do_complete
+        thread = threading.Thread(target=pool.run_forever)
+        thread.start()
+        try:
+            self.assertTrue(finished.wait(3))
+        finally:
+            pool.stop.set()
+            thread.join(3)
+        self.assertEqual([r.job_id for r in stub.completed], ["1"])
+        self.assertFalse(stub.failed)
+        self.assertFalse(thread.is_alive())
+
+    def test_pool_shares_engine_and_drains_only_after_every_task_finishes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            marker = pathlib.Path(temp) / "drained"
+            health = str(pathlib.Path(temp) / "ready")
+            stub = FakeStub()
+            started = threading.Barrier(3)
+            releases = [threading.Event(), threading.Event()]
+            lock = threading.Lock()
+            calls = []
+            processed = []
+
+            class Engine:
+                def transcribe(self, path, **kwargs):
+                    with lock:
+                        index = len(processed)
+                        processed.append(path)
+                    started.wait(timeout=3)
+                    if not releases[index].wait(3):
+                        raise TimeoutError()
+                    return TranscriptionResult(str(index), [])
+
+            engine = Engine()
+            pool = RemoteWorkerPool(
+                config(concurrency=2, poll_interval=0.01, health_file=health),
+                stub,
+                engine,
+                "synthetic-worker-token-at-least-32-characters",
+            )
+            assigned = set()
+
+            def do_claim(request, **kwargs):
+                with lock:
+                    calls.append(request.instance_id)
+                    if request.instance_id in assigned:
+                        return pb.WorkerClaimResponse()
+                    assigned.add(request.instance_id)
+                    return claim(
+                        job_id=request.instance_id, lease_token=request.instance_id
+                    )
+
+            stub.Claim = do_claim
+            with patch("whisper.remote_worker.DRAIN_FILE", marker):
+                thread = threading.Thread(target=pool.run_forever)
+                thread.start()
+                try:
+                    started.wait(timeout=3)
+                    self.assertTrue(healthy(health))
+                    self.assertEqual(len(set(calls)), 2)
+                    self.assertTrue(all(w.engine is engine for w in pool.workers))
+                    self.assertNotEqual(processed[0], processed[1])
+                    pool.drain.set()
+                    releases[0].set()
+                    deadline = time.monotonic() + 2
+                    while len(stub.completed) < 1 and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    self.assertEqual(len(stub.completed), 1)
+                    self.assertFalse(marker.exists())
+                    releases[1].set()
+                    deadline = time.monotonic() + 2
+                    while not marker.exists() and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    self.assertTrue(marker.exists())
+                    self.assertFalse(healthy(health))
+                    self.assertEqual(len(stub.completed), 2)
+                    self.assertEqual(len(calls), 2)
+                    self.assertTrue(
+                        all(not w._available.is_set() for w in pool.workers)
+                    )
+                    pool.drain.clear()
+                    deadline = time.monotonic() + 2
+                    while not healthy(health) and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    self.assertTrue(healthy(health))
+                    self.assertFalse(marker.exists())
+                finally:
+                    for release in releases:
+                        release.set()
+                    pool.stop.set()
+                    thread.join(3)
+                self.assertFalse(thread.is_alive())
+                self.assertFalse(healthy(health))
+
     def test_drain_finishes_current_task_and_resumes_without_claiming(self):
         with tempfile.TemporaryDirectory() as temp:
             marker = pathlib.Path(temp) / "drained"

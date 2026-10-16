@@ -38,7 +38,7 @@ class WorkerAPITests(unittest.TestCase):
             from whisper.inference import FasterWhisperEngine
 
             # Load native libraries before gRPC creates background threads.
-            cls.engine = FasterWhisperEngine()
+            cls.engine = FasterWhisperEngine(concurrency=2)
 
     def setUp(self):
         self.schema = "pilot_" + uuid.uuid4().hex
@@ -56,6 +56,7 @@ class WorkerAPITests(unittest.TestCase):
                 "JOB_MAX_ATTEMPTS": "2",
                 "PREFERRED_WORKER_IDS": "mac-primary,wsl-gpu,wsl-cpu",
                 "WORKER_AVAILABILITY_TTL_S": "90",
+                "WORKER_POLICIES": "",
             },
         )
         self.env.start()
@@ -176,6 +177,253 @@ class WorkerAPITests(unittest.TestCase):
                 "WHERE worker_id = %s AND instance_id = %s",
                 (worker_id, instance_id),
             )
+
+    def priority_pools(self, capacity=2):
+        self.store.worker_policies = {
+            "wsl-cpu": {"priority": 10, "max_concurrency": capacity},
+            "mac-primary": {"priority": 20, "max_concurrency": 2},
+            "server-fallback": {"priority": 100, "max_concurrency": 1},
+        }
+        slots = {
+            worker: [str(uuid.uuid4()) for _ in range(count)]
+            for worker, count in (
+                ("wsl-cpu", 2),
+                ("mac-primary", 2),
+                ("server-fallback", 1),
+            )
+        }
+        for worker, instances in slots.items():
+            for instance in instances:
+                self.report_availability(worker, instance)
+        return slots
+
+    def test_priority_fills_wsl_then_mac_then_local_fallback(self):
+        slots = self.priority_pools()
+        jobs = [self.submit() for _ in range(5)]
+        mac = slots["mac-primary"][0]
+        wsl = slots["wsl-cpu"]
+        fallback = slots["server-fallback"][0]
+        # Lower pools cannot win just by polling first.
+        self.assertFalse(self.claim_primary("mac-primary", mac).job_id)
+        first = self.claim_primary("wsl-cpu", wsl[0])
+        self.assertEqual(first.job_id, jobs[0])
+        self.assertFalse(self.claim_primary("wsl-cpu", wsl[0]).job_id)
+        self.assertFalse(self.claim_primary("mac-primary", mac).job_id)
+        self.assertEqual(self.claim_primary("wsl-cpu", wsl[1]).job_id, jobs[1])
+        self.assertEqual(self.claim_primary("mac-primary", mac).job_id, jobs[2])
+        self.assertIsNone(
+            self.store.claim_next_job(
+                "server-fallback", fallback=True, instance_id=fallback
+            )
+        )
+        self.assertEqual(
+            self.claim_primary("mac-primary", slots["mac-primary"][1]).job_id, jobs[3]
+        )
+        self.assertEqual(
+            self.store.claim_next_job(
+                "server-fallback", fallback=True, instance_id=fallback
+            ).job.job_id,
+            jobs[4],
+        )
+        # A freed high-priority slot gets the next job without preemption.
+        next_job = self.submit()
+        self.assertTrue(
+            self.rpc(
+                self.stub.Complete,
+                pb.WorkerCompleteRequest(
+                    job_id=first.job_id, lease_token=first.lease_token, text="done"
+                ),
+            ).accepted
+        )
+        self.assertEqual(self.claim_primary("wsl-cpu", wsl[0]).job_id, next_job)
+        self.assertEqual(self.store.get_job(jobs[2]).status, "running")
+
+    def test_priority_pool_cap_is_atomic_across_competing_slots(self):
+        slots = self.priority_pools(capacity=1)
+        for _ in range(4):
+            self.submit()
+        barrier = threading.Barrier(8)
+
+        def compete(index):
+            barrier.wait(timeout=5)
+            return self.claim_primary("wsl-cpu", slots["wsl-cpu"][index % 2])
+
+        with futures.ThreadPoolExecutor(max_workers=8) as executor:
+            results = list(executor.map(compete, range(8)))
+        self.assertEqual(sum(bool(result.job_id) for result in results), 1)
+        # A spare registered WSL slot cannot exceed the group cap or block Mac.
+        self.assertTrue(
+            self.claim_primary("mac-primary", slots["mac-primary"][0]).job_id
+        )
+        with self.store.connect() as conn:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT SUM(attempts) AS n FROM transcription_jobs"
+                ).fetchone()["n"],
+                2,
+            )
+
+    def test_priority_stuck_claim_loop_does_not_reserve_work_forever(self):
+        slots = self.priority_pools()
+        job = self.submit()
+        with self.store.connect() as conn:
+            conn.execute(
+                "UPDATE worker_availability SET demand_until = NOW() - INTERVAL '1 second' WHERE worker_id = 'wsl-cpu'"
+            )
+        # A healthy reporter alone cannot renew demand.
+        for instance in slots["wsl-cpu"]:
+            self.report_availability("wsl-cpu", instance)
+        self.assertEqual(
+            self.claim_primary("mac-primary", slots["mac-primary"][0]).job_id, job
+        )
+        next_job = self.submit()
+        # Resuming polling immediately restores WSL's priority.
+        self.assertEqual(
+            self.claim_primary("wsl-cpu", slots["wsl-cpu"][0]).job_id, next_job
+        )
+
+    def test_priority_disabled_unlisted_unready_and_expired_slots(self):
+        slots = self.priority_pools()
+        job = self.submit()
+        self.store.worker_policies["wsl-cpu"]["max_concurrency"] = 0
+        self.assertFalse(self.claim_primary("wsl-cpu", slots["wsl-cpu"][0]).job_id)
+        self.assertFalse(self.claim().job_id)  # Unlisted authenticated identity.
+        self.assertFalse(self.claim_primary("mac-primary", "").job_id)
+        self.report_availability("mac-primary", slots["mac-primary"][0], False)
+        self.expire_availability("mac-primary", slots["mac-primary"][1])
+        self.assertFalse(
+            self.claim_primary("mac-primary", slots["mac-primary"][0]).job_id
+        )
+        self.assertFalse(
+            self.claim_primary("mac-primary", slots["mac-primary"][1]).job_id
+        )
+        self.assertEqual(
+            self.store.claim_next_job(
+                "server-fallback",
+                fallback=True,
+                instance_id=slots["server-fallback"][0],
+            ).job.job_id,
+            job,
+        )
+
+    def test_priority_expired_lease_releases_capacity_and_fences_old_owner(self):
+        slots = self.priority_pools(capacity=1)
+        job = self.submit()
+        first = self.claim_primary("wsl-cpu", slots["wsl-cpu"][0])
+        self.expire(job)
+        replacement = self.claim_primary("wsl-cpu", slots["wsl-cpu"][1])
+        self.assertEqual(replacement.job_id, job)
+        self.assertNotEqual(replacement.lease_token, first.lease_token)
+        self.assertFalse(
+            self.rpc(
+                self.stub.Complete,
+                pb.WorkerCompleteRequest(
+                    job_id=job, lease_token=first.lease_token, text="stale"
+                ),
+            ).accepted
+        )
+        self.assertTrue(
+            self.rpc(
+                self.stub.Complete,
+                pb.WorkerCompleteRequest(
+                    job_id=job, lease_token=replacement.lease_token, text="current"
+                ),
+            ).accepted
+        )
+
+    def test_priority_equal_pools_share_capacity_and_cancel_frees_slot(self):
+        slots = self.priority_pools()
+        self.store.worker_policies["mac-primary"]["priority"] = 10
+        first_job, next_job = self.submit(), self.submit()
+        first = self.claim_primary("mac-primary", slots["mac-primary"][0])
+        self.assertEqual(first.job_id, first_job)
+        self.store.cancel_job(first_job)
+        self.assertEqual(
+            self.claim_primary("mac-primary", slots["mac-primary"][0]).job_id, next_job
+        )
+
+    def test_priority_old_running_attempt_blocks_pool_until_finished(self):
+        first_job, next_job = self.submit(), self.submit()
+        legacy = self.claim()  # Old worker has no registered slot.
+        slots = self.priority_pools()
+        # Emulate upgrading a pool while a legacy attempt is still running.
+        with self.store.connect() as conn:
+            conn.execute(
+                "UPDATE transcription_jobs SET assigned_worker_id = 'wsl-cpu' WHERE job_id = %s",
+                (first_job,),
+            )
+        self.assertFalse(self.claim_primary("wsl-cpu", slots["wsl-cpu"][0]).job_id)
+        self.assertEqual(
+            self.claim_primary("mac-primary", slots["mac-primary"][0]).job_id, next_job
+        )
+        self.assertTrue(
+            self.rpc(
+                self.stub.Complete,
+                pb.WorkerCompleteRequest(
+                    job_id=first_job, lease_token=legacy.lease_token, text="legacy"
+                ),
+            ).accepted
+        )
+
+    def test_priority_metrics_count_slots_and_bound_free_capacity(self):
+        from whisper.metrics import render_metrics
+
+        slots = self.priority_pools(capacity=1)
+        job = self.submit()
+        claimed = self.claim_primary("wsl-cpu", slots["wsl-cpu"][0])
+        self.assertEqual(claimed.job_id, job)
+        snapshot = self.store.metrics_snapshot()
+        workers = {row["worker_id"]: row for row in snapshot["workers"]}
+        self.assertEqual(workers["wsl-cpu"]["instances"], 2)
+        # One spare loop exists, but the pool's only place is already leased.
+        payload = render_metrics(
+            snapshot,
+            dict.fromkeys(self.store.worker_policies, "preferred"),
+            self.store.worker_policies,
+        ).decode()
+        self.assertIn(
+            'transcriber_worker_free_slots{worker_id="wsl-cpu",worker_role="preferred"} 0.0',
+            payload,
+        )
+        self.assertIn(
+            'transcriber_worker_priority{worker_id="wsl-cpu",worker_role="preferred"} 10.0',
+            payload,
+        )
+        for instances in slots.values():
+            self.assertTrue(all(instance not in payload for instance in instances))
+
+    def test_priority_heartbeat_waiting_for_scheduler_cannot_revive_expired_lease(self):
+        slots = self.priority_pools(capacity=1)
+        job = self.submit()
+        claimed = self.claim_primary("wsl-cpu", slots["wsl-cpu"][0])
+        with (
+            self.store.connect() as blocker,
+            futures.ThreadPoolExecutor(max_workers=1) as executor,
+        ):
+            blocker.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended('transcriber:scheduler:' || current_schema(), 0))"
+            )
+            renewing = executor.submit(
+                self.store.heartbeat, job, claimed.lease_token, 0
+            )
+            try:
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline:
+                    with self.store.connect() as observer:
+                        waiting = observer.execute(
+                            "SELECT COUNT(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted"
+                        ).fetchone()["n"]
+                    if waiting:
+                        break
+                    time.sleep(0.01)
+                self.assertTrue(waiting)
+                # Heartbeat's transaction began while the lease was valid, but
+                # the actual update must check the clock after waiting for lock.
+                self.expire(job)
+            finally:
+                blocker.commit()
+            self.assertFalse(renewing.result(timeout=3))
+        self.assertEqual(self.claim_primary("wsl-cpu", slots["wsl-cpu"][1]).job_id, job)
 
     def test_primary_offline_allows_fallback_without_consuming_attempts(self):
         job_id = self.submit()
@@ -958,7 +1206,7 @@ class WorkerAPITests(unittest.TestCase):
         original = self.store.get_job(job_id)
         with self.store.connect() as conn:
             conn.execute(
-                "ALTER TABLE transcription_jobs DROP COLUMN request_id, DROP COLUMN retain_until_ack, DROP COLUMN acknowledged_at"
+                "ALTER TABLE transcription_jobs DROP COLUMN request_id, DROP COLUMN retain_until_ack, DROP COLUMN acknowledged_at, DROP COLUMN assigned_worker_id, DROP COLUMN assigned_instance_id"
             )
             # Emulate the old production schema, which predates availability.
             conn.execute(
@@ -988,7 +1236,7 @@ class WorkerAPITests(unittest.TestCase):
                 conn.execute(
                     "SELECT COUNT(*) AS n FROM transcriber_schema_migrations"
                 ).fetchone()["n"],
-                4,
+                5,
             )
 
     def test_real_mac_inference_optional(self):
@@ -1008,6 +1256,57 @@ class WorkerAPITests(unittest.TestCase):
         job = self.store.get_job(job_id)
         self.assertEqual(job.status, "done")
         self.assertIn("worker", job.text.lower())
+
+    def test_real_shared_model_pool_optional(self):
+        audio_file = os.getenv("TRANSCRIBER_PILOT_AUDIO_FILE")
+        if not audio_file:
+            self.skipTest(
+                "Set TRANSCRIBER_PILOT_AUDIO_FILE for shared-model speech smoke"
+            )
+        from whisper.remote_worker import RemoteWorkerPool
+
+        self.store.worker_policies = {"wsl-cpu": {"priority": 10, "max_concurrency": 2}}
+        jobs = [self.submit(Path(audio_file).read_bytes()) for _ in range(2)]
+        barrier = threading.Barrier(2)
+        engine = self.engine
+
+        class SharedEngine:
+            def transcribe(self, *args, **kwargs):
+                barrier.wait(timeout=10)
+                return engine.transcribe(*args, **kwargs)
+
+        pool = RemoteWorkerPool(
+            Config(
+                f"127.0.0.1:{self.port}",
+                "/unused",
+                "wsl-cpu",
+                concurrency=2,
+                poll_interval=0.05,
+            ),
+            self.stub,
+            SharedEngine(),
+            self.token("wsl-cpu"),
+        )
+        thread = threading.Thread(target=pool.run_forever)
+        thread.start()
+        try:
+            deadline = time.monotonic() + 120
+            while time.monotonic() < deadline:
+                states = [self.store.get_job(job).status for job in jobs]
+                if states == ["done", "done"]:
+                    break
+                if "failed" in states:
+                    self.fail("Shared-model inference failed")
+                time.sleep(0.1)
+            self.assertEqual(states, ["done", "done"])
+            for job in jobs:
+                result = self.store.get_job(job)
+                self.assertIn("worker", result.text.lower())
+                self.assertEqual(result.attempts, 1)
+        finally:
+            pool.stop.set()
+            thread.join(15)
+        self.assertFalse(thread.is_alive())
 
 
 if __name__ == "__main__":

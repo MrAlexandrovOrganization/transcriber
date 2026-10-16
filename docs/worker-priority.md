@@ -1,59 +1,120 @@
-# Preferred workers and server fallback
+# Pool priorities and shared-model workers
 
-Compose configures `mac-m3-pro`, `wsl-gpu`, and `wsl-cpu` as preferred workers;
-the permanent worker is `server-fallback` with `WORKER_FALLBACK=1`.
-`PREFERRED_WORKER_IDS` is a comma-separated coordinator allowlist, identical on
-ingress and fallback worker. With no allowlist, storage preserves legacy claims.
+`worker_id` identifies a pool, such as `wsl-cpu`. Each execution slot has a fresh
+UUID in `instance_id`, its own job, lease token, heartbeat and temporary audio.
+Several slots can share one process and one loaded model. A process restart
+creates new slot UUIDs; a late withdrawal never removes a different slot.
 
-After loading its complete local model, each remote process creates a fresh UUID
-and calls authenticated `ReportAvailability(worker_id, instance_id, ready=true)`.
-It renews availability every 20 seconds independently of job polling, downloads
-and inference. PostgreSQL sets expiry using its own clock: default TTL 90 seconds,
-configurable with `WORKER_AVAILABILITY_TTL_S` (30–600). Reporting failure pauses
-new remote claims until reporting succeeds. Graceful shutdown attempts to withdraw
-its own process registration; crash, sleep, or lost connectivity expires by TTL.
-Old process shutdown cannot remove another process's registration.
+## Coordinator policy
 
-The same SQL statement that claims a job checks availability. The fallback can
-claim only if **none** of the configured preferred worker IDs has a live process.
-A preferred worker must have a live registration matching its own process UUID.
-Idle and busy processes both count as available: if all preferred workers are
-busy, jobs wait for them rather than overflowing to the server. Mac and both WSL
-workers share the same priority; they compete for jobs. There is no GPU-first
-ordering between these three workers.
+Set `WORKER_POLICIES` in the coordinator's private `.env`. Compose passes the
+same policy to ingress and the permanent local worker. This is an operator-owned
+JSON object; workers cannot submit a priority or increase their pool limit:
 
-Availability does not preempt a job already owned by the fallback. After preferred
-workers return, that job finishes on the server, and new fallback claims stop.
-A claim whose database snapshot predates registration can still succeed.
-Concurrent claims retain `FOR UPDATE SKIP LOCKED` and per-attempt lease fencing.
+```dotenv
+WORKER_POLICIES={"wsl-cpu":{"priority":10,"max_concurrency":2},"mac-m3-pro":{"priority":20,"max_concurrency":2},"wsl-gpu":{"priority":30,"max_concurrency":1},"server-fallback":{"priority":100,"max_concurrency":1}}
+WORKER_DEMAND_TTL_S=10
+```
 
-For new queued jobs the fallback becomes eligible after the last preferred
-availability expires (up to about 90 seconds, plus its two-second poll). Recovery
-of a job already running on a disconnected process also waits for its job lease:
-Compose now uses 120 seconds, renewed at most every 30 seconds. No job can be
-reclaimed while its original lease remains valid. Existing attempt limits still
-apply to repeatedly interrupted or failed inference. Losing the coordinator or
-its database prevents every worker from claiming until it returns.
+Lower priority numbers win. Equal numbers compete at the same tier. IDs absent
+from the policy cannot claim; `max_concurrency=0` disables new claims for a pool.
+Already leased jobs continue. The limit applies across every process/container
+using that worker ID, including slots whose availability report has expired but
+whose job lease is still valid. Priority is independent of model choice; it does
+not validate recognition quality or route by requested model.
 
-Registry rows older than one day are cleaned during reporting. Observe runtime
-readiness by selecting worker ID, `ready_until > now()`, and expiry from
-`worker_availability`; never inspect audio, bearer tokens or transcripts for a
-readiness check. Job claim/completion logs identify the owning worker/operation.
-The registry is not historical monitoring or a proof of inference quality.
+With two WSL and two Mac slots, the first two jobs go to WSL, the next two to Mac,
+then to the next ready free tier. A newly freed WSL slot takes the next queued
+job. Running work is never preempted. Local fallback uses exactly the same
+scheduler; `WORKER_FALLBACK` only affects legacy mode.
 
-Worker IDs are bound to individual bearer-token hashes by the coordinator.
-A token can report/claim only its worker ID and act only on leases owned by that
-identity. Workers connect through Caddy with gRPC/TLS. See
-[credentials and transport](worker-tls.md).
+The scheduler takes a short PostgreSQL transaction advisory lock, refreshes the
+requesting slot's demand, checks live leases and pool limits, selects the best
+free tier, then claims a FIFO job using `FOR UPDATE SKIP LOCKED`. The lock is
+released before downloading or inference. Per-attempt lease fencing still
+rejects expired owners' heartbeat/result/failure. Rejected priority/capacity
+checks do not consume job attempts.
+Lease renewals use the same lock and check the clock after acquiring it.
+Lock/statement waits and idle transactions have bounded timeouts, so a stalled
+coordinator transaction cannot hold scheduler admission indefinitely.
 
-Rollout updates ingress and permanent worker together through Git/CI/CD, then
-updates remote worker containers on the same published revision with `make up`.
-See [per-machine container configuration](container-workers.md). Migration
-`0003_worker_availability.sql` is additive and tracked by the existing ledger.
-Old clients remain protocol compatible; an old preferred native worker that
-cannot report availability will not claim work until upgraded.
+Availability expires on the coordinator clock (default 90 seconds, range
+30–600). Each loaded slot reports every 20 seconds independently of inference.
+Availability alone does not reserve work indefinitely: an idle slot must also
+have requested work within `WORKER_DEMAND_TTL_S` (5–60 seconds, default 10).
+A new registration gets one demand window; periodic readiness reports do not
+renew it. A reporter whose claim loop is stuck therefore stops blocking lower
+tiers after that window. Recovery of a running job still waits for its lease.
+Use `WORKER_POLL_INTERVAL_S=2` (the new default), shorter than the demand window.
 
-Checks cover real PostgreSQL/gRPC transitions, idle/busy readiness, TTL expiry,
-multiple instances, old-instance shutdown, authentication, simultaneous claims,
-and expired-owner fencing. Remote unit tests check reporting during inference,
-withdrawal at shutdown, and refusal to claim before readiness is accepted.
+## Several slots in one process
+
+On each worker machine, configure the existing single CPU/GPU container:
+
+```dotenv
+CPU_CONCURRENCY=2
+CPU_THREADS=2
+CPU_LIMIT=4
+CPU_MEMORY_LIMIT=5500m
+GPU_CONCURRENCY=1
+```
+
+`CPU_CONCURRENCY` / `GPU_CONCURRENCY` map to `WORKER_CONCURRENCY` (1–16) inside
+their containers. Native launches use `WORKER_CONCURRENCY` directly. The local
+server supports `SERVER_WORKER_CONCURRENCY`, default 1. The model is constructed
+once with faster-whisper `num_workers=N`, which configures CTranslate2 parallel
+execution workers sharing weights on the same device. Each slot calls this
+engine from its own thread; it never leases another job while processing one.
+See [CTranslate2 parallelism](https://opennmt.net/CTranslate2/parallel.html).
+
+CPU threads are **per execution worker**; container CPU/RAM limits are for the
+whole process. Budget approximately concurrency × threads, plus audio/VAD and
+other services. Shared weights save RAM compared with separate processes, but
+audio, features and decoder state still grow with concurrent jobs. The examples
+start at two CPU slots; measure peak RAM and latency before increasing them.
+Remote container workers and ordinary tests do not download models. ASUS remains disabled.
+
+One gRPC channel and credential are shared by the pool. A heartbeat, failure,
+cancellation or lost lease affects only its own job. SIGUSR1 stops new claims
+and drains all slots: `/tmp/worker-drained` appears only after every job has
+finished its Complete/Fail path and every slot has withdrawn readiness. SIGUSR2
+resumes them. The existing updater therefore drains the whole process before
+replacing it. Container health requires successful reports from all slots;
+SIGTERM stops all slots with the bounded existing shutdown grace. Unfinished
+leases expire and are recovered. Native local workers also share one model;
+they use the server's existing signal/lease lifecycle.
+
+## Rollout, compatibility and checks
+
+An empty/unset `WORKER_POLICIES` deliberately preserves the previous behavior:
+`PREFERRED_WORKER_IDS` is an unordered allowlist, all preferred workers race,
+and fallback waits while any preferred instance is online, even if busy.
+Do not treat that legacy list as an ordered priority configuration.
+
+Migration `0005_worker_slots.sql` is additive and tracked by the existing ledger.
+Update ingress and local fallback together through Git/CI/CD, then update remote
+workers and set their concurrency. Existing `.env` files are not overwritten by
+examples. Activate priorities by setting `WORKER_POLICIES` and recreating both
+coordinator services with the same configuration. If an old running attempt has
+no slot UUID, its pool is conservatively held until it finishes/expires. No
+protobuf fields/RPCs changed, and old remote single-slot processes remain wire
+compatible; update their polling interval if it was explicitly 60 seconds.
+
+Rollback: restore one slot per process and the previous coordinator policy (or
+empty policies for legacy semantics), then activate a compatible previous image.
+Keep the additive schema and migration ledger; do not reverse migrations or
+interrupt running jobs just to change priority. During a mixed coordinator
+rollout, old direct-DB workers do not enforce new policy, so enable it only after
+both coordinator services have been upgraded.
+
+Metrics expose ready execution slots, active jobs, configured priority/capacity
+and free slots with fresh demand. Labels use configured pool IDs, never slot
+UUIDs. Availability rows older than one day are cleaned during reports.
+
+`make test-integration` exercises real PostgreSQL/gRPC priority ordering,
+concurrent pool limits, disabled/unready/stuck slots, cancellation, expired lease
+recovery and old-schema adoption. Unit tests cover shared model construction,
+parallel request isolation, all-slot drain/resume and independent lease loss.
+With a cached model and synthetic English speech containing the word "worker",
+set `TRANSCRIBER_PILOT_AUDIO_FILE` to include real shared-model speech inference.
+Ordinary tests never download models or access production queues.

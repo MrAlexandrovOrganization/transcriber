@@ -84,8 +84,9 @@ class WorkerServicer(rpc.WorkerServiceServicer):
             )
             context.abort(grpc.StatusCode.FAILED_PRECONDITION, "Input is unavailable")
         logger.info(
-            "Worker claimed job: worker=%s job=%s attempt=%d",
+            "Worker claimed job: worker=%s slot=%s job=%s attempt=%d",
             request.worker_id,
+            request.instance_id,
             job.job_id,
             job.attempts,
         )

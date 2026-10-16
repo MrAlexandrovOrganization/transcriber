@@ -20,6 +20,7 @@ from opentelemetry.trace import SpanKind, Status, StatusCode
 from proto import whisper_pb2, whisper_pb2_grpc
 from whisper.inference import FasterWhisperEngine, InferenceStopped
 from whisper.metrics import MetricsEndpoint
+from whisper.scheduling import worker_concurrency
 from whisper.storage import (
     ClaimedJob,
     JobRecord,
@@ -267,14 +268,14 @@ def _prepend(first, remaining):
 
 
 class Worker:
-    def __init__(self, store: JobStore):
+    def __init__(self, store: JobStore, *, engine=None):
         self._store = store
         self._worker_id = os.getenv("WORKER_ID", f"worker-{uuid.uuid4()}")
         fallback = os.getenv("WORKER_FALLBACK", "0")
         if fallback not in {"0", "1"}:
             raise ValueError("WORKER_FALLBACK must be 0 or 1")
         self._fallback = fallback == "1"
-        self._engine = FasterWhisperEngine()
+        self._engine = engine if engine is not None else FasterWhisperEngine()
 
     def run_forever(self, stop: threading.Event | None = None) -> None:
         stop = stop or threading.Event()
@@ -300,7 +301,9 @@ class Worker:
             while not stop.is_set():
                 try:
                     claimed = self._store.claim_next_job(
-                        self._worker_id, fallback=self._fallback
+                        self._worker_id,
+                        fallback=self._fallback,
+                        instance_id=instance_id,
                     )
                     if claimed is not None:
                         self._process_claimed_job(claimed, stop)
@@ -467,7 +470,23 @@ def run_worker() -> None:
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())
-    Worker(store).run_forever(stop)
+    concurrency = worker_concurrency(os.getenv("WORKER_CONCURRENCY", "1"))
+    engine = FasterWhisperEngine(concurrency=concurrency)
+    workers = [Worker(store, engine=engine) for _ in range(concurrency)]
+    threads = [
+        threading.Thread(target=worker.run_forever, args=(stop,)) for worker in workers
+    ]
+    try:
+        for thread in threads:
+            thread.start()
+        while not stop.wait(0.5):
+            if not all(thread.is_alive() for thread in threads):
+                stop.set()
+    finally:
+        stop.set()
+        for thread in threads:
+            if thread.ident is not None:
+                thread.join()
 
 
 def safe_remove_job_dir(job: JobRecord) -> None:

@@ -31,7 +31,7 @@ x-environment: &environment
   REMOTE_WORKER_TLS: "1"
   REMOTE_WORKER_TOKEN_FILE: /run/credentials/token
   REMOTE_WORKER_HEALTH_FILE: /tmp/worker-ready
-  WORKER_POLL_INTERVAL_S: ${WORKER_POLL_INTERVAL_S:-60}
+  WORKER_POLL_INTERVAL_S: ${WORKER_POLL_INTERVAL_S:-2}
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
 
 x-worker: &worker
@@ -69,6 +69,7 @@ services:
     environment:
       <<: *environment
       WORKER_ID: ${CPU_WORKER_ID:-worker-cpu}
+      WORKER_CONCURRENCY: ${CPU_CONCURRENCY:-1}
       WHISPER_MODEL: ${CPU_MODEL:-large-v3}
       WHISPER_DEVICE: cpu
       WHISPER_COMPUTE_TYPE: ${CPU_COMPUTE_TYPE:-int8}
@@ -97,7 +98,8 @@ services:
     environment:
       <<: *environment
       WORKER_ID: ${GPU_WORKER_ID:-wsl-gpu}
-      WHISPER_MODEL: ${GPU_MODEL:-small}
+      WORKER_CONCURRENCY: ${GPU_CONCURRENCY:-1}
+      WHISPER_MODEL: ${GPU_MODEL:-large-v3-turbo}
       WHISPER_DEVICE: cuda
       WHISPER_COMPUTE_TYPE: ${GPU_COMPUTE_TYPE:-int8_float16}
       WHISPER_CPU_THREADS: ${GPU_THREADS:-2}

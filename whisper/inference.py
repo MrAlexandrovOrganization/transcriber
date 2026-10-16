@@ -8,6 +8,8 @@ import os
 import threading
 from collections.abc import Callable
 
+from whisper.scheduling import worker_concurrency
+
 _VOICE_PARAMS: dict = {
     "language": "ru",
     "beam_size": 5,
@@ -67,7 +69,7 @@ class TranscriptionResult:
 
 
 class FasterWhisperEngine:
-    def __init__(self):
+    def __init__(self, *, concurrency: int | None = None):
         from faster_whisper import WhisperModel
 
         device = os.getenv("WHISPER_DEVICE", "cpu").strip().lower()
@@ -76,6 +78,11 @@ class FasterWhisperEngine:
         threads = int(os.getenv("WHISPER_CPU_THREADS", "2"))
         if threads < 1:
             raise ValueError("WHISPER_CPU_THREADS must be positive")
+        concurrency = worker_concurrency(
+            str(concurrency)
+            if concurrency is not None
+            else os.getenv("WORKER_CONCURRENCY", "1")
+        )
         self._model = WhisperModel(
             os.getenv("WHISPER_MODEL", "small"),
             device=device,
@@ -83,6 +90,9 @@ class FasterWhisperEngine:
                 "WHISPER_COMPUTE_TYPE", "int8" if device == "cpu" else "float16"
             ),
             cpu_threads=threads,
+            # CTranslate2 shares model weights between execution workers on
+            # the same device. Every call keeps its own decoder/result state.
+            num_workers=concurrency,
             local_files_only=os.getenv("WHISPER_LOCAL_FILES_ONLY", "0") == "1",
         )
 

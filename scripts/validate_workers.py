@@ -14,6 +14,12 @@ def validate(document):
         raise ValueError("Enable cpu and/or gpu in COMPOSE_PROFILES")
     paths = []
     for name, service in workers.items():
+        try:
+            concurrency = int(service["environment"].get("WORKER_CONCURRENCY", "1"))
+            if not 1 <= concurrency <= 16:
+                raise ValueError()
+        except (ValueError, TypeError):
+            raise ValueError("WORKER_CONCURRENCY must be within 1..16") from None
         sources = [
             mount["source"]
             for mount in service["volumes"]

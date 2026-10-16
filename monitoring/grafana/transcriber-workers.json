@@ -1052,7 +1052,7 @@
       "id": 14
     },
     {
-      "title": "Готовые инстансы каждого worker_id",
+      "title": "Готовые слоты каждого worker_id",
       "type": "timeseries",
       "datasource": {
         "type": "prometheus",
@@ -1064,7 +1064,7 @@
         "w": 12,
         "h": 7
       },
-      "description": "Значение больше 1 может означать временное перекрытие при рестарте или дублирующий запуск.",
+      "description": "Один процесс может предоставлять несколько слотов с общей моделью. Число слотов не равно числу процессов.",
       "targets": [
         {
           "refId": "A",
@@ -1180,6 +1180,145 @@
       "id": 16
     },
     {
+      "title": "Свободные слоты и лимит группы",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 42,
+        "w": 12,
+        "h": 7
+      },
+      "description": "Свободные слоты учитывают свежие запросы задач и остаток лимита группы. Метрики появляются при включённом WORKER_POLICIES.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "transcriber_worker_free_slots{worker_id=~\"$worker\",worker_id!~\"ingress|other\"}",
+          "legendFormat": "{{worker_id}} свободно",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "range": true,
+          "instant": false
+        },
+        {
+          "refId": "B",
+          "expr": "transcriber_worker_capacity{worker_id=~\"$worker\",worker_id!~\"ingress|other\"}",
+          "legendFormat": "{{worker_id}} лимит",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "—",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 17
+    },
+    {
+      "title": "Приоритеты групп",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 42,
+        "w": 12,
+        "h": 7
+      },
+      "description": "Меньшее число означает более высокий приоритет. Занятая группа пропускает работу следующей свободной.",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "transcriber_worker_priority{worker_id=~\"$worker\",worker_id!~\"ingress|other\"}",
+          "legendFormat": "{{worker_id}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "range": true,
+          "instant": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "—",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 18
+    },
+    {
       "title": "Семантика доступности",
       "type": "text",
       "datasource": {
@@ -1188,7 +1327,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 42,
+        "y": 49,
         "w": 24,
         "h": 4
       },
@@ -1223,7 +1362,7 @@
         "mode": "markdown",
         "content": "Ready означает, что модель загружена и воркер сообщает о готовности. Занятость определяется действующим lease; доступность не является гарантией успешной расшифровки. Ноль прогресса означает idle или отсутствие ещё полученных сегментов. **RAM/VRAM удалённых устройств здесь пока не собираются.** [Очередь и доставка результатов](/d/transcriber-overview)"
       },
-      "id": 17
+      "id": 19
     }
   ],
   "links": [

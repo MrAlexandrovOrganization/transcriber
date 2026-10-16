@@ -34,13 +34,13 @@ service WorkerService {
 
 message WorkerClaimRequest {
   string worker_id = 1;
-  // Matches the reporting process. Required for configured preferred workers.
+  // Matches a ready execution slot. Required when pool priorities are enabled.
   string instance_id = 2;
 }
 
 message WorkerAvailabilityRequest {
   string worker_id = 1;
-  string instance_id = 2; // Fresh UUID on each process start.
+  string instance_id = 2; // Fresh UUID per slot on each process start.
   bool ready = 3; // Only after the model has loaded; false on graceful stop.
 }
 

@@ -20,6 +20,7 @@ UPDATE transcription_jobs AS jobs
 SET status = 'running', attempts = jobs.attempts + 1,
     lease_owner = %s,
     lease_expires_at = NOW() + (%s * INTERVAL '1 second'),
+    assigned_worker_id = %s, assigned_instance_id = %s,
     started_at = COALESCE(jobs.started_at, NOW()), updated_at = NOW(), error = ''
 FROM candidate
 WHERE jobs.job_id = candidate.job_id

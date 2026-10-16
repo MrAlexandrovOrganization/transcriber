@@ -31,11 +31,12 @@ COMPOSE_PROFILES=cpu,gpu
 CPU_WORKER_ID=wsl-cpu
 CPU_MODEL=large-v3
 CPU_COMPUTE_TYPE=int8
-CPU_THREADS=4
+CPU_THREADS=2
+CPU_CONCURRENCY=2
 CPU_LIMIT=4
 CPU_MEMORY_LIMIT=5500m
 GPU_WORKER_ID=wsl-gpu
-GPU_MODEL=small
+GPU_MODEL=large-v3-turbo
 GPU_COMPUTE_TYPE=int8_float16
 GPU_THREADS=2
 GPU_CPU_LIMIT=1.5
@@ -46,22 +47,26 @@ GPU_WORKER_TOKEN_PATH=/home/your-login/.config/transcriber/gpu.token
 ```
 
 `COMPOSE_PROFILES=cpu`, `gpu`, or `cpu,gpu` selects the worker containers.
-At least one worker profile is required. Each worker processes one task at a
-time. Thread counts and CPU quotas are separate settings. Limits on container
+At least one worker profile is required. Each container loads one model and runs
+`CPU_CONCURRENCY` / `GPU_CONCURRENCY` execution slots (default 1, range 1–16).
+Each slot processes one task at a time. CPU threads are per slot; CPU quotas
+and RAM limits cover the whole container. Limits on container
 RAM do not limit VRAM. After changing models, limits or profiles, run `make up`;
 `make restart` only restarts existing containers with their existing configuration.
 Successful `make up` also removes any CPU/GPU container disabled by the new
 profiles. It waits up to 180 seconds for readiness after building/starting.
 
-The Mac example uses `CPU_MODEL=large-v3`, two threads and a two-CPU quota.
+The Mac example uses `CPU_MODEL=large-v3`, two slots of two threads and a four-CPU quota.
 It is Linux/ARM64 CPU inference; Metal/MLX is not enabled. The WSL GPU example
-keeps `small` as the existing production default. To select turbo, prepare its
-cache and set `GPU_MODEL=large-v3-turbo` explicitly. `large` is currently a
+uses `large-v3-turbo`; prepare its cache before starting. `large` is currently a
 faster-whisper alias for `large-v3`; explicit names make the choice clearer.
 
-Worker IDs must match the coordinator's `PREFERRED_WORKER_IDS` if they should
-block server fallback. Mac, WSL CPU and WSL GPU have equal priority. Selection
-does not currently route jobs by model or guarantee equal recognition quality.
+Worker IDs must appear in coordinator `WORKER_POLICIES` when priorities are
+enabled. The server example puts WSL CPU before Mac CPU, WSL GPU and server
+fallback. Configure pool caps there as well as actual slot counts on devices;
+the effective capacity cannot exceed either. An empty policy retains legacy
+`PREFERRED_WORKER_IDS` behavior. See [priorities and shared-model slots](worker-priority.md).
+Selection does not route jobs by model or guarantee equal recognition quality.
 
 ## Runtime prerequisites and private files
 

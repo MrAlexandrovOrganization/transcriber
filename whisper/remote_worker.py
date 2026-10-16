@@ -27,6 +27,7 @@ from proto import whisper_pb2_grpc as rpc
 from whisper.inference import FasterWhisperEngine, InferenceStopped
 from whisper.jsonlog import setup_logging
 from whisper.limits import MAX_RESULT_BYTES
+from whisper.scheduling import worker_concurrency
 from whisper.telemetry import context_from_carrier, init_telemetry
 from whisper.worker_health import report as report_health
 
@@ -39,7 +40,7 @@ class Config:
     endpoint: str
     token_file: str
     worker_id: str
-    poll_interval: float = 60.0
+    poll_interval: float = 2.0
     rpc_timeout: float = 15.0
     download_timeout: float = 120.0
     max_input_bytes: int = 256 * 1024 * 1024
@@ -47,8 +48,10 @@ class Config:
     tls_ca_file: str = ""
     shutdown_grace: float = 10.0
     health_file: str = ""
+    concurrency: int = 1
 
     def __post_init__(self):
+        worker_concurrency(str(self.concurrency))
         target = urlsplit("//" + self.endpoint)
         try:
             valid_port = target.port is not None and target.port > 0
@@ -96,7 +99,7 @@ class Config:
                 "WORKER_ID",
                 f"{re.sub(r'[^A-Za-z0-9_.:-]', '_', socket.gethostname())[:90]}-{uuid.uuid4().hex}",
             ),
-            poll_interval=float(os.getenv("WORKER_POLL_INTERVAL_S", "60")),
+            poll_interval=float(os.getenv("WORKER_POLL_INTERVAL_S", "2")),
             rpc_timeout=float(os.getenv("REMOTE_WORKER_RPC_TIMEOUT_S", "15")),
             download_timeout=float(
                 os.getenv("REMOTE_WORKER_DOWNLOAD_TIMEOUT_S", "120")
@@ -108,6 +111,7 @@ class Config:
             tls_ca_file=os.getenv("REMOTE_WORKER_TLS_CA_FILE", ""),
             shutdown_grace=float(os.getenv("REMOTE_WORKER_SHUTDOWN_GRACE_S", "10")),
             health_file=os.getenv("REMOTE_WORKER_HEALTH_FILE", ""),
+            concurrency=worker_concurrency(os.getenv("WORKER_CONCURRENCY", "1")),
         )
 
 
@@ -141,6 +145,7 @@ class RemoteWorker:
         engine,
         token: str,
         stop: threading.Event | None = None,
+        lifecycle=None,
     ):
         self.config = config
         self.stub = stub
@@ -151,6 +156,23 @@ class RemoteWorker:
         self.drain = threading.Event()
         self._drained = threading.Event()
         self._metadata = (("authorization", "Bearer " + token),)
+        self._lifecycle = lifecycle
+        self._availability_lock = threading.Lock()
+
+    def _health(self, ready):
+        if self._lifecycle is None:
+            report_health(self.config.health_file, ready)
+        else:
+            self._lifecycle.health(self.instance_id, ready)
+
+    def _mark_drained(self, drained):
+        if self._lifecycle is None:
+            if drained:
+                DRAIN_FILE.touch()
+            else:
+                DRAIN_FILE.unlink(missing_ok=True)
+        else:
+            self._lifecycle.mark_drained(self.instance_id, drained)
 
     def _call(self, method, request):
         return method(request, timeout=self.config.rpc_timeout, metadata=self._metadata)
@@ -169,11 +191,11 @@ class RemoteWorker:
                         try:
                             self._report_availability(False)
                         except Exception:
-                            report_health(self.config.health_file, False)
-                        DRAIN_FILE.touch()
+                            self._health(False)
+                        self._mark_drained(True)
                         while self.drain.is_set() and not self.stop.wait(0.25):
                             pass
-                        DRAIN_FILE.unlink(missing_ok=True)
+                        self._mark_drained(False)
                         self._drained.clear()
                         if self.stop.is_set():
                             break
@@ -190,8 +212,9 @@ class RemoteWorker:
                         )
                         reporter.start()
                         logger.info(
-                            "Worker availability registered: worker=%s",
+                            "Worker availability registered: worker=%s slot=%s",
                             self.config.worker_id,
+                            self.instance_id,
                         )
                     if not self._available.wait(0.5):
                         continue
@@ -223,7 +246,7 @@ class RemoteWorker:
                     self.stop.wait(self.config.poll_interval)
         finally:
             self.stop.set()
-            report_health(self.config.health_file, False)
+            self._health(False)
             if reporter is not None:
                 reporter.join(timeout=4)
                 try:
@@ -233,19 +256,23 @@ class RemoteWorker:
                     pass
 
     def _report_availability(self, ready):
-        response = self.stub.ReportAvailability(
-            pb.WorkerAvailabilityRequest(
-                worker_id=self.config.worker_id,
-                instance_id=self.instance_id,
-                ready=ready,
-            ),
-            timeout=min(3.0, self.config.rpc_timeout),
-            metadata=self._metadata,
-        )
-        if not response.accepted or response.ttl_seconds < 30:
-            raise ValueError("Coordinator rejected worker availability")
-        report_health(self.config.health_file, ready)
-        return min(20.0, response.ttl_seconds / 3.0)
+        with self._availability_lock:
+            # A reporter already waiting for this lock cannot re-register a
+            # slot after drain/stop has withdrawn it and acknowledged drain.
+            ready = ready and not self._drained.is_set() and not self.stop.is_set()
+            response = self.stub.ReportAvailability(
+                pb.WorkerAvailabilityRequest(
+                    worker_id=self.config.worker_id,
+                    instance_id=self.instance_id,
+                    ready=ready,
+                ),
+                timeout=min(3.0, self.config.rpc_timeout),
+                metadata=self._metadata,
+            )
+            if not response.accepted or response.ttl_seconds < 30:
+                raise ValueError("Coordinator rejected worker availability")
+            self._health(ready)
+            return min(20.0, response.ttl_seconds / 3.0)
 
     def _report_availability_loop(self, interval):
         while not self.stop.wait(interval):
@@ -260,7 +287,7 @@ class RemoteWorker:
                 self._available.set()
             except Exception:
                 self._available.clear()
-                report_health(self.config.health_file, False)
+                self._health(False)
                 logger.warning(
                     "Worker availability report unavailable; retry scheduled"
                 )
@@ -402,6 +429,70 @@ class RemoteWorker:
             logger.warning("Worker failure acknowledgement unavailable")
 
 
+class RemoteWorkerPool:
+    """Bounded execution loops sharing one engine, channel and process lifecycle."""
+
+    def __init__(self, config: Config, stub, engine, token: str, stop=None, drain=None):
+        self.config = config
+        self.stop = stop if stop is not None else threading.Event()
+        self.drain = drain if drain is not None else threading.Event()
+        self._lock = threading.Lock()
+        self._ready: set[str] = set()
+        self._drained: set[str] = set()
+        self.workers = [
+            RemoteWorker(config, stub, engine, token, self.stop, lifecycle=self)
+            for _ in range(config.concurrency)
+        ]
+        for worker in self.workers:
+            worker.drain = self.drain
+
+    def health(self, instance_id, ready):
+        with self._lock:
+            if ready:
+                self._ready.add(instance_id)
+            else:
+                self._ready.discard(instance_id)
+            report_health(
+                self.config.health_file,
+                len(self._ready) == len(self.workers)
+                and not self.stop.is_set()
+                and not self.drain.is_set(),
+            )
+
+    def mark_drained(self, instance_id, drained):
+        with self._lock:
+            if drained:
+                self._drained.add(instance_id)
+            else:
+                self._drained.discard(instance_id)
+            if len(self._drained) == len(self.workers) and self.drain.is_set():
+                DRAIN_FILE.touch()
+            else:
+                DRAIN_FILE.unlink(missing_ok=True)
+
+    def run_forever(self):
+        threads = [
+            threading.Thread(
+                target=worker.run_forever, name=f"worker-slot-{index}", daemon=True
+            )
+            for index, worker in enumerate(self.workers)
+        ]
+        try:
+            for thread in threads:
+                thread.start()
+            while not self.stop.wait(0.1):
+                if not all(thread.is_alive() for thread in threads):
+                    self.stop.set()
+        finally:
+            self.stop.set()
+            deadline = time.monotonic() + self.config.shutdown_grace
+            for thread in threads:
+                if thread.ident is not None:
+                    thread.join(timeout=max(0, deadline - time.monotonic()))
+            report_health(self.config.health_file, False)
+            DRAIN_FILE.unlink(missing_ok=True)
+
+
 def main():
     setup_logging("remote-worker")
     stop = threading.Event()
@@ -416,21 +507,24 @@ def main():
         signal.signal(signal.SIGUSR1, lambda *_: drain.set())
         signal.signal(signal.SIGUSR2, lambda *_: drain.clear())
         # Load dependencies and model before leasing any task.
-        engine = FasterWhisperEngine()
-        logger.info("Remote worker ready: worker=%s", config.worker_id)
+        engine = FasterWhisperEngine(concurrency=config.concurrency)
+        logger.info(
+            "Remote worker ready: worker=%s slots=%d",
+            config.worker_id,
+            config.concurrency,
+        )
         shutdown_telemetry = init_telemetry("whisper-remote-worker")
         with open_channel(config) as channel:
-            worker = RemoteWorker(
-                config, rpc.WorkerServiceStub(channel), engine, token, stop
+            worker = RemoteWorkerPool(
+                config, rpc.WorkerServiceStub(channel), engine, token, stop, drain
             )
-            worker.drain = drain
             thread = threading.Thread(
                 target=worker.run_forever, daemon=True, name="remote-worker"
             )
             thread.start()
             while thread.is_alive() and not stop.wait(0.5):
                 pass
-            thread.join(timeout=config.shutdown_grace)
+            thread.join(timeout=config.shutdown_grace + 1)
         shutdown_telemetry()
         return 0
     except Exception:

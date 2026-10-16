@@ -16,6 +16,8 @@ import psycopg
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
+from whisper.scheduling import parse_policies
+
 logger = logging.getLogger(__name__)
 
 UTC = timezone.utc
@@ -88,6 +90,10 @@ class JobStore:
         self._dsn = os.environ["DATABASE_URL"]
         self._lease_seconds = int(os.getenv("JOB_LEASE_SECONDS", "900"))
         self._max_attempts = int(os.getenv("JOB_MAX_ATTEMPTS", "3"))
+        self.worker_policies = parse_policies(os.getenv("WORKER_POLICIES", ""))
+        self._demand_ttl_seconds = int(os.getenv("WORKER_DEMAND_TTL_S", "10"))
+        if not 5 <= self._demand_ttl_seconds <= 60:
+            raise ValueError("WORKER_DEMAND_TTL_S must be within 5..60")
         self._preferred_workers = [
             value.strip()
             for value in os.getenv("PREFERRED_WORKER_IDS", "").split(",")
@@ -121,7 +127,7 @@ class JobStore:
         return self._storage_root
 
     def connect(self) -> psycopg.Connection:
-        return psycopg.connect(self._dsn, row_factory=dict_row)
+        return psycopg.connect(self._dsn, row_factory=dict_row, connect_timeout=3)
 
     def metrics_snapshot(self) -> dict[str, list[dict]]:
         # Independent, bounded, read-only snapshot: scrapes never hold job locks.
@@ -375,6 +381,7 @@ class JobStore:
                     worker_id,
                     instance_id,
                     self._availability_ttl_seconds if ready else 0,
+                    self._demand_ttl_seconds if ready else 0,
                 ),
             )
         return True
@@ -386,6 +393,32 @@ class JobStore:
         lease_owner = f"{worker_id}/{uuid.uuid4()}"
         with self.connect() as conn:
             with conn.cursor() as cur:
+                if self.worker_policies:
+                    # The statement after this lock gets a fresh READ COMMITTED
+                    # snapshot, including every previous slot grant.
+                    cur.execute(_sql("scheduler_lock"))
+                    cur.execute(_sql("reap"))
+                    cur.execute(
+                        _sql("request_work"),
+                        (self._demand_ttl_seconds, worker_id, instance_id),
+                    )
+                    eligible = cur.execute(
+                        _sql("select_worker"),
+                        (Json(self.worker_policies), worker_id, instance_id),
+                    ).fetchone()
+                    row = None
+                    if eligible:
+                        row = cur.execute(
+                            _sql("claim_slot"),
+                            (lease_owner, self._lease_seconds, worker_id, instance_id),
+                        ).fetchone()
+                    return (
+                        ClaimedJob(
+                            self._row_to_job(row), lease_owner, row["lease_expires_at"]
+                        )
+                        if row
+                        else None
+                    )
                 cur.execute(_sql("reap"))
                 cur.execute(
                     _sql("claim"),
@@ -398,6 +431,8 @@ class JobStore:
                         instance_id,
                         lease_owner,
                         self._lease_seconds,
+                        worker_id,
+                        instance_id,
                     ),
                 )
                 row = cur.fetchone()
@@ -420,6 +455,11 @@ class JobStore:
     def heartbeat(self, job_id: str, worker_id: str, progress_percent: float) -> bool:
         with self.connect() as conn:
             with conn.cursor() as cur:
+                if self.worker_policies:
+                    # Lease renewal must serialize with capacity decisions too:
+                    # a renewal in flight near expiry cannot resurrect a busy
+                    # slot after a concurrent claim has counted it as free.
+                    cur.execute(_sql("scheduler_lock"))
                 cur.execute(
                     _sql("heartbeat"),
                     (self._lease_seconds, progress_percent, job_id, worker_id),
