@@ -12,8 +12,8 @@ the protected existing credential registry and
 remove server-fallback from `WORKER_POLICIES`; only WSL/Mac pools remain.
 Caddy uses `TRANSCRIBER_WORKER_UPSTREAM=h2c://transcriber-worker-api:50056` and
 `TRANSCRIBER_WORKER_PROXY_OPTIONS=local_proxy`; CLIP/Stash keep their independent
-TLS origin settings. The upload API binds only `100.64.0.5:50053`. PostgreSQL receives 0.5 CPU
-on Russia: the former 0.1 CPU quota stalled concurrent worker scheduling and
+TLS origin settings. The upload API binds only `100.64.0.5:50053`. PostgreSQL and ingress each receive up to 0.5 CPU
+on Russia: the former 0.1 CPU quotas stalled concurrent worker scheduling and
 heartbeats during the migration probe.
 
 The bot uses Russia's shared local Telegram Bot API and its existing read-only

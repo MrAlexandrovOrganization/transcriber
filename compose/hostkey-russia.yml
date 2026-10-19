@@ -6,6 +6,10 @@ services:
         limits:
           cpus: "0.5"
   whisper-ingress:
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
     ports:
       - "100.64.0.5:50053:50053"
     environment:
