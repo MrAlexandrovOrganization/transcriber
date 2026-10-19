@@ -2,7 +2,7 @@
 
 ## Build versions
 
-`Makefiles/versions.mk` owns Python, Poetry and PostgreSQL versions. The exact
+`makefiles/versions.mk` owns Python, Poetry and PostgreSQL versions. The exact
 grpcio-tools version is read from `poetry.lock`, also used for Python dependency
 installation. Run `make versions` to inspect values; install that Poetry version
 locally. Use `make build`/`make up`: Make exports versions to Compose build args.
@@ -16,7 +16,7 @@ the machine's `.env` selects the required files automatically.
 
 | File | Purpose |
 | --- | --- |
-| `compose/server.yml` | PostgreSQL, ingress and server fallback worker |
+| `compose/server.yml` | PostgreSQL, ingress and optional fallback worker |
 | `compose/worker-tls.yml` | Server listener for Caddy and per-worker credentials |
 | `compose/workers.yml` | CPU/GPU workers selected by profiles |
 | `compose/workers.autodeploy.yml` | Published inference images and updater |
@@ -142,7 +142,7 @@ leases and return results. They need neither database credentials nor a shared
 filesystem. No worker endpoint is enabled by the normal deployment.
 
 Start with a synthetic local experiment, using Python/Poetry at the versions
-from `Makefiles/versions.mk`, Buf at `BUF_VERSION`, and Docker with the pinned PostgreSQL
+from `makefiles/versions.mk`, Buf at `BUF_VERSION`, and Docker with the pinned PostgreSQL
 image already present. Install dependencies with `make install`, then:
 
 ```bash
@@ -186,6 +186,41 @@ Its implementation and guarantees are documented in that independent repository,
 `docs/durable-voice.md`. [The initial runtime audit](docs/distributed-workers.md)
 records the earlier deployment and is historical context.
 
+## CI image delivery
+
+On pull requests CI checks and builds the `linux/amd64` server image. On pushes
+to `main`, it publishes that same image to GHCR and passes its digest manifest to
+the SSH deploy job. The ingress and permanent fallback worker share one image;
+their `SERVICE_ROLE` settings remain separate. VM activation pulls the digest
+before recreating services and uses `--no-build --pull never --wait`. PostgreSQL,
+the durable job/audio volumes, and the existing migration-on-start behavior are
+preserved. A short ingress restart during activation is expected.
+
+The deployment entry point is `make ci-deploy` in `makefiles/ci-deploy.mk`.
+The SSH step loads this target from the checked commit, so it also works for the
+first rollout before the VM checkout contains the new Makefile. The target
+serializes deployment, rejects dirty or stale checkouts, fast-forwards to the
+tested SHA, logs in to GHCR with a temporary Actions token, and invokes
+`make image-deploy`. The Docker credentials are removed when that command exits.
+For a manual release, use `make image-deploy IMAGE_MANIFEST=/path/to/release.json`;
+`make up` remains the local source-build workflow. In server mode, `make deploy`
+applies a release manifest and no longer rebuilds the backend on the VM.
+
+`.images/current.json` records the last activated release and `previous.json`
+the preceding one. To restore that image, check out the `revision` in
+`previous.json` and run `make image-deploy IMAGE_MANIFEST=.images/previous.json`.
+Review database compatibility first: an image rollback does not reverse schema
+migrations. Keep the corresponding GHCR digest available.
+
+The CPU/GPU worker images keep their separate multi-architecture publication and
+stable-release flow. CI advances that worker release only after the backend
+deployment and worker image publication both succeed; each worker updater drains
+and replaces workers one at a time.
+
+The server package is built with the `org.opencontainers.image.source` label so
+GitHub can associate it with this repository. Ensure the Actions token has
+`packages: write` for publication and `packages: read` for deployment.
+
 ## Checks
 
 `make format` applies safe Ruff fixes, import ordering, Python and proto
@@ -222,3 +257,16 @@ Compose uses explicit service names without replica numbers. Set
 `CONTAINER_NAME_PREFIX` (for example `dev-`) for an additional local or CI stack
 on the same Docker host. Keep Compose project/service labels and volume names
 unchanged; clients address services or explicit network aliases.
+
+## Hostkey Russia
+
+The coordinator and bot run on hostkey-russia; inference stays on remote workers.
+The server-side worker is opt-in (`COMPOSE_PROFILES=fallback`); leave the profile
+unset on Russia and on the old server. `SERVER_OVERLAY=compose/hostkey-russia.yml`
+adds a client gRPC listener bound only to Russia's tailnet address. Worker RPCs
+continue through Caddy TLS with unchanged individual credentials.
+
+The old server runs only `make forwarder-up`: its Docker alias `whisper-ingress`
+forwards existing notes-bot/stash clients to Russia. The same proxy exposes
+Jaeger OTLP on the old server's tailnet address for the moved services.
+See [migration and rollback](docs/hostkey-russia-migration.md).

@@ -105,6 +105,7 @@ services:
           cpus: "0.1"
 
   whisper-worker:
+    profiles: [fallback]
     container_name: "${CONTAINER_NAME_PREFIX:-}transcriber-worker"
     build:
       context: .

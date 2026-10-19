@@ -4,7 +4,7 @@ Read README.md, docs/container-workers.md, docs/worker-tls.md and
 docs/worker-autodeploy.md for the supported lifecycle. This repository owns
 proto/whisper.proto. docs/distributed-workers.md is a historical audit.
 
-- Versions: Makefiles/versions.mk; dependencies and grpcio-tools generator:
+- Versions: makefiles/versions.mk; dependencies and grpcio-tools generator:
   pyproject.toml/poetry.lock. Generated proto files are ignored; use make proto-gen.
 - Compose files live in compose/. The root Makefile anchors their paths to the
   checkout root. Machine .env selects server/workers, CPU/GPU profiles and models.

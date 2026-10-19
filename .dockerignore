@@ -1,8 +1,12 @@
 .git
 .venv
+.DS_Store
 .env
 .env.*
 .secrets
+.images
+*.ogg
+*.wav
 __pycache__
 **/__pycache__
 .ruff_cache

@@ -1,0 +1,27 @@
+{
+	auto_https off
+	servers {
+		protocols h1 h2c
+	}
+}
+
+:50053 {
+	reverse_proxy h2c://100.64.0.5:50053
+}
+
+:4317 {
+	reverse_proxy h2c://jaeger:4317
+}
+
+:4318 {
+	reverse_proxy http://jaeger:4318
+}
+
+:50056 {
+	reverse_proxy https://100.64.0.5 {
+		header_up Host workers.mralexandrov.duckdns.org
+		transport http {
+			tls_server_name workers.mralexandrov.duckdns.org
+		}
+	}
+}

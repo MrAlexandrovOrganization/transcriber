@@ -13,7 +13,7 @@ Docker Engine/Colima/Docker Desktop still needs to be running.
 | --- | --- | --- | --- | --- |
 | Mac | `.env.mac.example` | `workers` | `cpu` | One CPU worker |
 | WSL | `.env.wsl.example` | `workers` | `cpu,gpu` | Independent CPU and CUDA workers |
-| Server | `.env.server.example` | `server` | unset | Existing PostgreSQL, ingress and fallback worker |
+| Server | `.env.server.example` | `server` | unset | PostgreSQL and ingress; opt-in fallback profile |
 
 Copy the relevant example to `.env` once, then edit its machine-specific values.
 Do not overwrite an existing `.env`. `TRANSCRIBER_ROLE=server|workers` and the
@@ -99,7 +99,7 @@ See [TLS and per-worker credentials](worker-tls.md) for provisioning, rotation,
 revocation and upgrades. TLS is the only supported remote transport.
 
 CPU and CUDA targets share the same Python application and Poetry lockfile.
-The CUDA target adds cuBLAS/cuDNN wheels pinned only in `Makefiles/versions.mk`. Containers are
+The CUDA target adds cuBLAS/cuDNN wheels pinned only in `makefiles/versions.mk`. Containers are
 non-root with dropped capabilities, read-only root filesystems and bounded
 temporary storage/logs. Model cache is persistent and read-only; temporary audio
 is disposable. The coordinator remains responsible for durable jobs/results.

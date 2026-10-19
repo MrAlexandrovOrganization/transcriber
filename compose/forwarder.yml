@@ -1,0 +1,33 @@
+services:
+  forwarder:
+    image: caddy:${CADDY_TEST_VERSION:?Run via make}
+    container_name: transcriber-forwarder
+    restart: unless-stopped
+    volumes:
+      - ./deploy/forwarder.Caddyfile:/etc/caddy/Caddyfile:ro
+    ports:
+      - "100.64.0.1:4317:4317"
+      - "100.64.0.1:4318:4318"
+    networks:
+      whisper-net:
+        aliases: [whisper-ingress]
+      jaeger-net: {}
+      caddy-transcriber-net:
+        aliases: [transcriber-worker-api]
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, "http://127.0.0.1:2019/config/"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+    mem_limit: 32m
+    cpus: "0.1"
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "3"}
+networks:
+  whisper-net:
+    external: true
+  jaeger-net:
+    external: true
+  caddy-transcriber-net:
+    external: true

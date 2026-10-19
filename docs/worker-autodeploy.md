@@ -9,9 +9,9 @@ Push to `main` starts `.github/workflows/ci.yaml`:
    both architectures; CUDA supports amd64. Images carry the tested Git SHA.
    Registry build-cache tags reuse dependency/CUDA layers across CI runners;
    revision labels are applied on export without invalidating those layers.
-3. The VM deploys that exact SHA with a clean working copy and `make deploy`;
-   ingress/PostgreSQL must become healthy. Deployment never fetches an untested
-   newer `main` through a plain `git pull`.
+3. The VM deploys the checked server-image digest with `make ci-deploy` from the
+   same SHA; ingress/PostgreSQL must become healthy. Deployment rejects dirty
+   checkouts and stale workflows instead of fetching a newer `main`.
 4. Only after both publication and VM deployment succeed, `make promote-workers`
    publishes one `transcriber-release:stable` marker containing immutable CPU/GPU
    manifest digests and the approved SHA. A failed pipeline cannot promote it.

@@ -7,6 +7,8 @@ TRANSCRIBER_ROLE ?= $(or $(shell sed -n 's/^TRANSCRIBER_ROLE=//p' $(ENV_FILE) 2>
 WORKER_AUTODEPLOY ?= $(or $(shell sed -n 's/^WORKER_AUTODEPLOY=//p' $(ENV_FILE) 2>/dev/null),0)
 WORKER_REGISTRY ?= ghcr.io/mralexandrovorganization/transcriber
 export WORKER_REGISTRY
+IMAGE_REPOSITORY ?= ghcr.io/mralexandrovorganization/transcriber
+export IMAGE_REPOSITORY
 WORKER_RELEASE_FILE ?= .worker-release.env
 WORKER_RELEASE_ENV = $(if $(wildcard $(WORKER_RELEASE_FILE)),--env-file "$(WORKER_RELEASE_FILE)")
 # Reject obsolete SSH configurations instead of silently changing transport.
@@ -23,24 +25,35 @@ $(error WORKER_TLS_ENABLED must be an unquoted 0 or 1)
 endif
 # Keep paths, default project name and volumes anchored to the checkout root.
 COMPOSE_FILES = -f compose/server.yml
+IMAGE_COMPOSE_FILES = compose/server.yml
 ifeq ($(strip $(TRANSCRIBER_ROLE)),workers)
 COMPOSE_FILES = -f compose/workers.yml
+IMAGE_COMPOSE_FILES = compose/workers.yml
 ifeq ($(strip $(WORKER_AUTODEPLOY)),1)
 COMPOSE_FILES += -f compose/workers.autodeploy.yml
+IMAGE_COMPOSE_FILES += compose/workers.autodeploy.yml
 else
 WORKER_RELEASE_ENV =
 endif
 else
 ifeq ($(strip $(WORKER_TLS_ENABLED)),1)
 COMPOSE_FILES += -f compose/worker-tls.yml
+IMAGE_COMPOSE_FILES += compose/worker-tls.yml
 endif
 endif
+SERVER_OVERLAY ?= $(shell sed -n 's/^SERVER_OVERLAY=//p' $(ENV_FILE) 2>/dev/null)
+ifneq ($(strip $(SERVER_OVERLAY)),)
+COMPOSE_FILES += -f $(SERVER_OVERLAY)
+IMAGE_COMPOSE_FILES += $(SERVER_OVERLAY)
+endif
+export IMAGE_COMPOSE_FILES
+export IMAGE_RUNTIME_ENV_FILE := $(ENV_FILE)
 DOCKER_COMPOSE = docker compose --project-directory "$(CURDIR)" $(WORKER_RELEASE_ENV) $(if $(wildcard $(ENV_FILE)),--env-file "$(ENV_FILE)") $(COMPOSE_FILES)
 # Timestamped attestations change local image IDs even for a cached build,
 # causing an unnecessary Compose restart on every make up.
 BUILDX_NO_DEFAULT_ATTESTATIONS ?= 1
 export BUILDX_NO_DEFAULT_ATTESTATIONS
-include Makefiles/versions.mk
+include makefiles/versions.mk
 
 .PHONY: install
 install:
@@ -106,9 +119,11 @@ logs:
 	$(DOCKER_COMPOSE) logs -f
 
 .PHONY: deploy
-deploy:
-	$(MAKE) up
-	$(DOCKER_COMPOSE) up -d --wait --wait-timeout 240
+ifeq ($(strip $(TRANSCRIBER_ROLE)),server)
+deploy: image-deploy
+else
+deploy: up
+endif
 
 .PHONY: restart
 restart:
@@ -135,6 +150,25 @@ build:
 	$(DOCKER_COMPOSE) build
 
 compose-build: build
+
+# CI publishes this exact server image; the VM only pulls and activates its digest.
+.PHONY: image-build image-publish image-deploy image-activate image-compose
+image-build:
+	python3 scripts/images.py build
+
+image-publish:
+	python3 scripts/images.py publish
+
+image-deploy:
+	python3 scripts/images.py deploy
+
+image-activate:
+	$(IMAGE_COMPOSE) up -d --no-build --pull never --remove-orphans --wait --wait-timeout 240
+	$(MAKE) monitoring-install
+
+image-compose:
+	python3 scripts/images.py compose
+export IMAGE_ARGS
 
 build-workers:
 	$(MAKE) ENV_FILE=.env.wsl.example TRANSCRIBER_ROLE=workers build
@@ -181,7 +215,7 @@ config-check-examples:
 	$(MAKE) ENV_FILE=.env.wsl.example TRANSCRIBER_ROLE=workers config-check
 	$(MAKE) ENV_FILE=.env.server.example TRANSCRIBER_ROLE=server WORKER_TLS_ENABLED=1 config-check
 
-check: proto-gen proto-check config-check config-check-examples monitoring-check
+check: proto-gen proto-check config-check config-check-examples monitoring-check forwarder-check
 	poetry run ruff check whisper tests scripts
 	poetry run ruff format --check whisper tests scripts
 	$(MAKE) test
@@ -254,3 +288,15 @@ monitoring-install:
 	python3 scripts/install_monitoring.py
 
 .PHONY: dashboards monitoring-check monitoring-install
+
+include makefiles/ci-deploy.mk
+
+# Compatibility for clients that still run on the original server.
+FORWARDER_COMPOSE = docker compose --project-directory "$(CURDIR)" -p transcriber-forwarder -f compose/forwarder.yml
+.PHONY: forwarder-up forwarder-down forwarder-check
+forwarder-up:
+	$(FORWARDER_COMPOSE) up -d --no-build --wait --wait-timeout 60
+forwarder-down:
+	$(FORWARDER_COMPOSE) down
+forwarder-check:
+	$(FORWARDER_COMPOSE) config --quiet

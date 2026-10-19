@@ -50,32 +50,79 @@ jobs:
         run: make test-worker-tls-docker
       - name: Verify real Docker update and rollback
         run: make test-updater-docker
-      - name: Build images
-        run: make build
       - name: Build CPU and CUDA images without production credentials
         run: make build-workers
+
+  app-image:
+    name: Build and publish backend image
+    needs: check
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      manifest: ${{ steps.publish.outputs.manifest }}
+    env:
+      IMAGE_REPOSITORY: ghcr.io/${{ github.repository }}
+      SOURCE_REVISION: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build the server image once
+        run: make image-build
+      - name: Log in to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish the checked image
+        id: publish
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: make image-publish
+      - name: Keep the release manifest for rollback
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: transcriber-server-release
+          path: .images/release.json
+          include-hidden-files: true
+          retention-days: 30
 
   deploy:
     name: Deploy to VM
     runs-on: ubuntu-24.04
-    needs: check
+    needs: [check, app-image]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    permissions:
+      contents: read
+      packages: read
+    concurrency:
+      group: transcriber-production-deploy
+      cancel-in-progress: false
 
     steps:
-      - name: Deploy via SSH
+      - name: Activate the published server digest
         uses: appleboy/ssh-action@v1
+        env:
+          PROJECT_PATH: ${{ secrets.VM_PROJECT_PATH }}
+          DEPLOY_SHA: ${{ github.sha }}
+          IMAGE_MANIFEST_B64: ${{ needs.app-image.outputs.manifest }}
+          IMAGE_REPOSITORY: ghcr.io/${{ github.repository }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           host: ${{ secrets.VM_HOST }}
           username: ${{ secrets.VM_USER }}
           key: ${{ secrets.VM_SSH_KEY }}
+          envs: PROJECT_PATH,DEPLOY_SHA,IMAGE_MANIFEST_B64,IMAGE_REPOSITORY,GHCR_USER,GHCR_TOKEN
+          command_timeout: 35m
           script: |
             set -eu
-            cd ${{ secrets.VM_PROJECT_PATH }}
-            test -z "$(git status --porcelain)"
-            git fetch origin ${{ github.sha }}
-            git merge --ff-only ${{ github.sha }}
-            test "$(git rev-parse HEAD)" = '${{ github.sha }}'
-            make deploy
+            cd "${PROJECT_PATH:?}"
+            test "$(git rev-parse --show-toplevel)" = "$(pwd -P)"
+            git fetch --quiet origin refs/heads/main
+            git show "$DEPLOY_SHA:makefiles/ci-deploy.mk" | make -f - ci-deploy
 
   publish:
     name: Publish ${{ matrix.arch }} worker images

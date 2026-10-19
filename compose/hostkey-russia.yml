@@ -1,0 +1,7 @@
+# Only trusted tailnet clients reach the upload API; workers use Caddy TLS.
+services:
+  whisper-ingress:
+    ports:
+      - "100.64.0.5:50053:50053"
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://100.64.0.1:4317
