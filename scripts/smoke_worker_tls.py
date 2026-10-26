@@ -20,6 +20,7 @@ from whisper.worker_auth import WorkerCredentials
 
 
 class SyntheticStore:
+    queue_backend = "postgres"
     availability_ttl_seconds = 90
     lease_seconds = 120
 
@@ -46,6 +47,7 @@ class SyntheticStore:
             traceparent="",
             tracestate="",
             attempts=1,
+            lease_owner=self.owner,
         )
         return SimpleNamespace(job=self.job, lease_owner=self.owner)
 
