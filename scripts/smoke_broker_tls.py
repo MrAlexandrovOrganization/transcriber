@@ -126,7 +126,22 @@ def main():
             for _ in range(45):
                 try:
                     docker(
-                        "exec", container, "rabbitmq-diagnostics", "-q", "check_running"
+                        "exec",
+                        "--user",
+                        "rabbitmq",
+                        container,
+                        "test",
+                        "-s",
+                        "/var/lib/rabbitmq/.erlang.cookie",
+                    )
+                    docker(
+                        "exec",
+                        "--user",
+                        "rabbitmq",
+                        container,
+                        "rabbitmq-diagnostics",
+                        "-q",
+                        "check_running",
                     )
                     break
                 except RuntimeError:

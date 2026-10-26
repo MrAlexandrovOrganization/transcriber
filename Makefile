@@ -237,11 +237,12 @@ test-rabbit-up:
 		-e RABBITMQ_DEFAULT_VHOST=transcriber_pilot \
 		-p 127.0.0.1:56739:5672 rabbitmq:$(RABBITMQ_VERSION)
 	@ready=0; for attempt in $$(seq 1 45); do \
-		docker exec transcriber-ci-test-rabbitmq rabbitmq-diagnostics -q check_running >/dev/null 2>&1 && { ready=1; break; }; \
+		docker exec --user rabbitmq transcriber-ci-test-rabbitmq test -s /var/lib/rabbitmq/.erlang.cookie >/dev/null 2>&1 && \
+		docker exec --user rabbitmq transcriber-ci-test-rabbitmq rabbitmq-diagnostics -q check_running >/dev/null 2>&1 && { ready=1; break; }; \
 		[ "$$(docker inspect --format '{{.State.Running}}' transcriber-ci-test-rabbitmq)" = true ] || break; \
 		sleep 1; \
 	done; if [ "$$ready" != 1 ]; then docker logs --tail 80 transcriber-ci-test-rabbitmq; exit 1; fi
-	docker exec transcriber-ci-test-rabbitmq rabbitmqctl set_policy -p transcriber_pilot test-retry \
+	docker exec --user rabbitmq transcriber-ci-test-rabbitmq rabbitmqctl set_policy -p transcriber_pilot test-retry \
 		'^transcriber\..*\.retry$$' '{"dead-letter-strategy":"at-least-once","overflow":"reject-publish"}' --apply-to quorum_queues
 	python3 scripts/test_rabbit_config.py
 

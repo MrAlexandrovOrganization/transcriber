@@ -21,7 +21,7 @@ services:
       whisper-net:
         aliases: [transcriber-rabbitmq]
     healthcheck:
-      test: [CMD, rabbitmq-diagnostics, -q, check_running]
+      test: [CMD, su-exec, rabbitmq, rabbitmq-diagnostics, -q, check_running]
       interval: 20s
       timeout: 10s
       retries: 6
