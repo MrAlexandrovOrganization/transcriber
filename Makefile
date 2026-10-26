@@ -24,6 +24,10 @@ endif
 ifneq ($(filter-out 0 1,$(strip $(WORKER_TLS_ENABLED))),)
 $(error WORKER_TLS_ENABLED must be an unquoted 0 or 1)
 endif
+WORKER_TAILNET ?= $(or $(shell sed -n 's/^WORKER_TAILNET=//p' $(ENV_FILE) 2>/dev/null),0)
+ifneq ($(filter-out 0 1,$(strip $(WORKER_TAILNET))),)
+$(error WORKER_TAILNET must be 0 or 1)
+endif
 QUEUE_BACKEND ?= $(or $(shell sed -n 's/^QUEUE_BACKEND=//p' $(ENV_FILE) 2>/dev/null),postgres)
 ifneq ($(filter-out postgres rabbitmq,$(strip $(QUEUE_BACKEND))),)
 $(error QUEUE_BACKEND must be postgres or rabbitmq)
@@ -66,6 +70,10 @@ else
 COMPOSE_FILES += -f compose/rabbitmq.yml
 IMAGE_COMPOSE_FILES += compose/rabbitmq.yml
 endif
+endif
+ifeq ($(strip $(TRANSCRIBER_ROLE)):$(strip $(WORKER_TAILNET)),workers:1)
+COMPOSE_FILES += -f compose/workers.tailnet.yml
+IMAGE_COMPOSE_FILES += compose/workers.tailnet.yml
 endif
 export IMAGE_COMPOSE_FILES
 export IMAGE_RUNTIME_ENV_FILE := $(ENV_FILE)
@@ -283,6 +291,8 @@ config-check-examples:
 	$(MAKE) ENV_FILE=.env.wsl.example WORKER_GPU_RUNTIME=wsl-direct QUEUE_BACKEND=rabbitmq CPU_RABBITMQ_DIR=/synthetic/rabbitmq/cpu GPU_RABBITMQ_DIR=/synthetic/rabbitmq/gpu config-check
 	$(MAKE) ENV_FILE=.env.mac.example QUEUE_BACKEND=rabbitmq CPU_RABBITMQ_DIR=/synthetic/rabbitmq/mac config-check
 	$(MAKE) ENV_FILE=.env.wsl.example QUEUE_BACKEND=rabbitmq CPU_RABBITMQ_DIR=/synthetic/rabbitmq/cpu GPU_RABBITMQ_DIR=/synthetic/rabbitmq/gpu config-check
+
+	$(MAKE) ENV_FILE=.env.wsl.example WORKER_GPU_RUNTIME=wsl-direct QUEUE_BACKEND=rabbitmq WORKER_TAILNET=1 CPU_RABBITMQ_DIR=/synthetic/rabbitmq/cpu GPU_RABBITMQ_DIR=/synthetic/rabbitmq/gpu WORKER_TAILNET_HOSTNAME=synthetic-workers HEADSCALE_LOGIN_SERVER=https://headscale.example.com HEADSCALE_AUTHKEY_PATH=/synthetic/headscale.key config-check
 
 check: proto-gen proto-check config-check config-check-examples monitoring-check forwarder-check
 	poetry run ruff check whisper tests scripts

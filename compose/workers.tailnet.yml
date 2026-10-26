@@ -1,0 +1,44 @@
+# Docker Desktop does not inherit a native host's Headscale routes.
+services:
+  worker-tailnet:
+    image: tailscale/tailscale:${TAILSCALE_VERSION:?Run via make}
+    container_name: "${CONTAINER_NAME_PREFIX:-}transcriber-worker-tailnet"
+    hostname: ${WORKER_TAILNET_HOSTNAME:?Set a unique per-device tailnet hostname}
+    environment:
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_USERSPACE: "false"
+      TS_AUTH_ONCE: "true"
+      TS_EXTRA_ARGS: "--login-server=${HEADSCALE_LOGIN_SERVER:?Set the existing Headscale URL} --auth-key=file:/run/secrets/headscale-auth --accept-dns=false --accept-routes=false --shields-up=true --timeout=60s"
+    volumes:
+      - worker-tailnet-state:/var/lib/tailscale
+      - type: bind
+        source: ${HEADSCALE_AUTHKEY_PATH:?Provision a per-device registration key}
+        target: /run/secrets/headscale-auth
+        read_only: true
+        bind: {create_host_path: false}
+    devices: [/dev/net/tun:/dev/net/tun]
+    cap_drop: [ALL]
+    # DAC_OVERRIDE reads the host-owned 0600 registration file; workers get no caps.
+    cap_add: [NET_ADMIN, NET_RAW, DAC_OVERRIDE]
+    restart: unless-stopped
+    mem_limit: 128m
+    cpus: 0.25
+    healthcheck:
+      test: [CMD-SHELL, "tailscale status --json | grep -q '\"BackendState\": \"Running\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 60s
+    logging:
+      driver: json-file
+      options: {max-size: 5m, max-file: "4"}
+  worker-cpu:
+    network_mode: service:worker-tailnet
+    depends_on:
+      worker-tailnet: {condition: service_healthy, restart: true}
+  worker-gpu:
+    network_mode: service:worker-tailnet
+    depends_on:
+      worker-tailnet: {condition: service_healthy, restart: true}
+volumes:
+  worker-tailnet-state:

@@ -191,3 +191,39 @@ Existing job/worker metrics remain. transcriber_outbox_pending and
 transcriber_outbox_oldest_seconds expose publication lag; queued age also includes
 time without any workers. Ready/admitted slots are not proof of inference
 progress. Container readiness additionally requires the slot's broker connection.
+
+### Docker Desktop and private Headscale access
+
+A native host VPN is not automatically routed into Docker Desktop's Linux VM.
+The migration verified that WSL itself can reach 100.64.0.5 while ordinary and
+host-network containers cannot. Use the optional, per-device `worker-tailnet`
+service instead of publishing AMQPS to the internet or depending on another
+project's VPN container:
+
+```dotenv
+WORKER_TAILNET=1
+WORKER_TAILNET_HOSTNAME=transcriber-workers-wsl
+HEADSCALE_LOGIN_SERVER=https://headscale.example.com
+HEADSCALE_AUTHKEY_PATH=/absolute/private/path/to/headscale.key
+```
+
+Provision a single-use, expiring Headscale preauth key for the existing owner,
+write it to a 0600 file without printing it, and mount only that file. The
+registration key is not an AMQP or worker API credential. Use distinct hostnames
+and registration keys for WSL and Mac. The sidecar retains its node identity in
+`worker-tailnet-state`; keep that volume. `TS_AUTH_ONCE=true` allows restart with
+an already-used/expired bootstrap key. A device that has never registered needs
+a fresh unexpired key before its first launch.
+
+The dedicated VPN container uses TUN and network capabilities, plus DAC_OVERRIDE
+for its host-owned credential file. Inference containers retain their non-root
+UID, read-only filesystem and dropped capabilities. They share the VPN network
+namespace and keep the same CPU/GPU models, limits and shared-model slots. DNS,
+subnet routes, exit-node advertisements and incoming connections are not enabled.
+The existing native host VPN and other projects are unchanged.
+
+The image is pinned by TAILSCALE_VERSION. The updater keeps the sidecar's network
+namespace when replacing inference images. After recreating the sidecar itself,
+use `make up` to recreate/reconnect dependent workers; service_healthy alone is
+not a guarantee of recovery after every future network failure. Without the
+sidecar, workers require a directly reachable private broker endpoint.

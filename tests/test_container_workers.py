@@ -42,7 +42,7 @@ class ContainerHealthTests(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which("docker"), "Docker CLI required for Compose checks")
 class ComposeTests(unittest.TestCase):
-    def compose(self, profiles, autodeploy=False, wsl_direct=False):
+    def compose(self, profiles, autodeploy=False, wsl_direct=False, tailnet=False):
         with tempfile.TemporaryDirectory() as temp:
             env_file = Path(temp) / "synthetic.env"
             env_file.write_text(
@@ -66,6 +66,7 @@ class ComposeTests(unittest.TestCase):
                 GRPCIO_TOOLS_VERSION="synthetic",
                 CUDNN_VERSION="synthetic",
                 CUBLAS_VERSION="synthetic",
+                TAILSCALE_VERSION="synthetic",
             )
             if autodeploy:
                 env.update(
@@ -91,6 +92,13 @@ class ComposeTests(unittest.TestCase):
                 command[6:6] = ["-f", "compose/workers.autodeploy.yml"]
             if wsl_direct:
                 command[6:6] = ["-f", "compose/workers.wsl-gpu.yml"]
+            if tailnet:
+                env.update(
+                    WORKER_TAILNET_HOSTNAME="synthetic-workers",
+                    HEADSCALE_LOGIN_SERVER="https://headscale.example.com",
+                    HEADSCALE_AUTHKEY_PATH="/synthetic/headscale.key",
+                )
+                command[6:6] = ["-f", "compose/workers.tailnet.yml"]
             result = subprocess.run(
                 command,
                 cwd=ROOT,
@@ -197,6 +205,31 @@ class ComposeTests(unittest.TestCase):
                 # Serialized config retains escapes for expansion in the image.
                 self.assertIn("$$LD_LIBRARY_PATH", gpu["entrypoint"][2])
                 self.assertIn('exec "$$@"', gpu["entrypoint"][2])
+
+    def test_tailnet_preserves_worker_security_and_resource_configuration(self):
+        normal = self.compose("cpu,gpu", autodeploy=True, wsl_direct=True)["services"]
+        shared = self.compose(
+            "cpu,gpu", autodeploy=True, wsl_direct=True, tailnet=True
+        )["services"]
+        vpn = shared["worker-tailnet"]
+        self.assertNotIn("ports", vpn)
+        self.assertNotIn("TS_AUTHKEY", vpn["environment"])
+        self.assertIn(
+            "--auth-key=file:/run/secrets/", vpn["environment"]["TS_EXTRA_ARGS"]
+        )
+        for role in ("cpu", "gpu"):
+            worker = shared["worker-" + role]
+            self.assertEqual(worker["network_mode"], "service:worker-tailnet")
+            for key in (
+                "user",
+                "read_only",
+                "cap_drop",
+                "environment",
+                "volumes",
+                "cpus",
+                "mem_limit",
+            ):
+                self.assertEqual(worker[key], normal["worker-" + role][key])
 
 
 if __name__ == "__main__":

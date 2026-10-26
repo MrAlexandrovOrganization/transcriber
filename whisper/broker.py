@@ -152,13 +152,24 @@ class Publisher:
         self.connection = None
         self.channel = None
 
-    async def _publish(self, job_id, message_id):
+    async def _ensure_ready(self):
         if self.connection is None or self.connection.is_closed:
             self.connection = await self.config.connect()
             self.channel = await self.connection.channel(
                 publisher_confirms=True, on_return_raises=True
             )
             await declare_topology(self.channel, self.config)
+
+    def ensure_ready(self):
+        # Bootstrap empty queues and service the publisher's idle heartbeats.
+        try:
+            self.runner.run(asyncio.wait_for(self._ensure_ready(), timeout=10))
+        except Exception:
+            self.runner.run(self._close())
+            raise RuntimeError("RabbitMQ topology unavailable") from None
+
+    async def _publish(self, job_id, message_id):
+        await self._ensure_ready()
         exchange = await self.channel.get_exchange(
             self.config.name("tasks"), ensure=False
         )
@@ -204,6 +215,7 @@ def publish_outbox(store, config, stop):
     try:
         while not stop.is_set():
             try:
+                publisher.ensure_ready()
                 if not store.publish_next(publisher.publish):
                     stop.wait(0.5)
             except Exception:

@@ -229,6 +229,16 @@ class RabbitIntegrationTests(unittest.TestCase):
         self.assertEqual(engine.calls, 1)
         self.assertEqual(self.store.get_job(job).attempts, 1)
 
+    def test_publisher_bootstraps_empty_queue_before_any_submission(self):
+        self.publisher.ensure_ready()
+        gate = threading.Event()
+        gate.set()
+        pool = self.start_pool("wsl-cpu", 1, GateEngine(gate))
+        self.wait(lambda: self.ready(pool))
+        job = self.submit()
+        self.publish()
+        self.wait(lambda: self.store.get_job(job).status == "done")
+
     def test_real_broker_preserves_priorities_and_shared_model_slots(self):
         # Create topology before subscribing, without publishing work yet.
         from whisper.broker import declare_topology
