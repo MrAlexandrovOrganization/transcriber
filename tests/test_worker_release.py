@@ -174,12 +174,15 @@ class ReleaseTests(unittest.TestCase):
             IMAGE,
             "new-image",
             defaults,
-            {"Env": ["LD_LIBRARY_PATH=/new-image/cuda"]},
+            {
+                "Env": ["LD_LIBRARY_PATH=/new-image/cuda"],
+                "Cmd": ["python", "-m", "whisper.remote_worker"],
+            },
         )
         self.assertEqual(new["Entrypoint"], wrapper)
         self.assertEqual(new["HostConfig"], old["HostConfig"])
         self.assertNotIn("LD_LIBRARY_PATH=/old-image/cuda", new["Env"])
-        self.assertNotIn("Cmd", new)  # Let the replacement image supply its command.
+        self.assertEqual(new["Cmd"], ["python", "-m", "whisper.remote_worker"])
 
     def test_recovery_rolls_back_unhealthy_replacement_and_quarantines_it(self):
         with tempfile.TemporaryDirectory() as temp:

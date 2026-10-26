@@ -32,6 +32,7 @@ def main():
     # Smoke images are deliberately local; all other calls use the real API.
     docker.pull = lambda image: docker.call("GET", "/images/" + image + "/json")
     shared = os.getenv("SMOKE_NETWORK") == "shared"
+    wrapper = os.getenv("SMOKE_ENTRYPOINT") == "wrapper"
     network = None
     names = [project + ":" + version for version in ("old", "new", "bad")]
     try:
@@ -50,7 +51,7 @@ def main():
                 (root / "Dockerfile").write_text(
                     f"FROM python:{os.environ['PYTHON_VERSION']}-slim\n"
                     f'LABEL smoke.version="{version}" io.transcriber.drain-protocol="1"\n'
-                    'COPY worker.py /worker.py\nCMD ["python", "/worker.py"]\n'
+                    f'COPY worker.py /worker-{version}.py\nCMD ["python", "/worker-{version}.py"]\n'
                 )
                 subprocess.run(["docker", "build", "-q", "-t", tag, temp], check=True)
             network = docker.call(
@@ -74,6 +75,14 @@ def main():
                 "/containers/create?name=" + project,
                 {
                     "Image": names[0],
+                    **(
+                        {
+                            "Entrypoint": ["/bin/sh", "-c", 'exec "$@"', "--"],
+                            "Cmd": ["python", "/worker-old.py"],
+                        }
+                        if wrapper
+                        else {}
+                    ),
                     "Labels": {
                         "com.docker.compose.project": project,
                         "com.docker.compose.service": "worker-cpu",
@@ -133,6 +142,7 @@ def main():
                     {
                         "project": project,
                         "network": "shared" if shared else "bridge",
+                        "entrypoint_wrapper": wrapper,
                         "healthy_replacement": True,
                         "unhealthy_rollback": True,
                     }

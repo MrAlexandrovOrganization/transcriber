@@ -152,6 +152,10 @@ def replacement(old, image, image_id, old_defaults=None, new_defaults=None):
     for key in ("Cmd", "Entrypoint", "WorkingDir"):
         if key in old_defaults and config.get(key) == old_defaults[key]:
             config.pop(key, None)
+    if config.get("Entrypoint") and "Cmd" not in config and "Cmd" in new_defaults:
+        # Docker clears the image CMD when create explicitly overrides ENTRYPOINT.
+        # WSL's CUDA wrapper still needs the replacement image's default command.
+        config["Cmd"] = new_defaults["Cmd"]
     config["Labels"]["com.docker.compose.image"] = image_id
     host = dict(old["HostConfig"])
     host.pop("ConsoleSize", None)

@@ -335,6 +335,7 @@ promote-workers:
 test-updater-docker:
 	python3 scripts/smoke_updater.py
 	SMOKE_NETWORK=shared python3 scripts/smoke_updater.py
+	SMOKE_NETWORK=shared SMOKE_ENTRYPOINT=wrapper python3 scripts/smoke_updater.py
 
 .PHONY: test-updater-docker
 
