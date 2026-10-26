@@ -29,6 +29,16 @@ def validate(document):
             raise ValueError("Set the selected worker's token path")
         if service["environment"].get("REMOTE_WORKER_TLS") != "1":
             raise ValueError("Container workers require TLS")
+        if service["environment"].get("RABBITMQ_CONNECTION_FILE"):
+            broker = [
+                mount["source"]
+                for mount in service["volumes"]
+                if mount["target"] == "/run/rabbitmq"
+            ]
+            if len(broker) != 1 or broker[0].startswith("/missing/"):
+                raise ValueError(
+                    "Set the selected worker's RabbitMQ credential directory"
+                )
         paths.extend(sources)
     if len(set(paths)) != len(paths):
         raise ValueError("TLS workers require distinct token files")

@@ -1,0 +1,65 @@
+# Activated explicitly after provisioning credentials and draining SQL claimers.
+services:
+  rabbitmq:
+    image: rabbitmq:${RABBITMQ_VERSION:?Run via make}
+    container_name: "${CONTAINER_NAME_PREFIX:-}transcriber-rabbitmq"
+    hostname: transcriber-rabbitmq
+    restart: unless-stopped
+    ports:
+      - "${RABBITMQ_BIND_ADDRESS:-127.0.0.1}:${RABBITMQ_PORT:-5671}:5671"
+    volumes:
+      - whisper-rabbitmq-data:/var/lib/rabbitmq
+      - type: bind
+        source: ${RABBITMQ_CONFIG_DIR:?Provision RabbitMQ configuration first}
+        target: /etc/rabbitmq
+        read_only: true
+        bind: {create_host_path: false}
+    networks:
+      whisper-net:
+        aliases: [transcriber-rabbitmq]
+    healthcheck:
+      test: [CMD, rabbitmq-diagnostics, -q, check_running]
+      interval: 20s
+      timeout: 10s
+      retries: 6
+      start_period: 60s
+    mem_limit: 512m
+    cpus: 1
+    logging:
+      driver: json-file
+      options: {max-size: 5m, max-file: "4"}
+  whisper-ingress:
+    environment:
+      QUEUE_BACKEND: rabbitmq
+      RABBITMQ_CONNECTION_FILE: /run/rabbitmq/connection.json
+      RABBITMQ_CA_FILE: /run/rabbitmq/ca.crt
+    volumes:
+      - type: bind
+        source: ${RABBITMQ_PUBLISHER_DIR:?Provision publisher credentials first}
+        target: /run/rabbitmq
+        read_only: true
+        bind: {create_host_path: false}
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+  whisper-worker:
+    command: [python, -m, whisper.remote_worker]
+    environment:
+      REMOTE_WORKER_ENDPOINT: ${SERVER_WORKER_ENDPOINT:-workers.example.com:443}
+      REMOTE_WORKER_TLS: "1"
+      REMOTE_WORKER_TOKEN_FILE: /run/credentials/token
+      RABBITMQ_CONNECTION_FILE: /run/rabbitmq/connection.json
+      RABBITMQ_CA_FILE: /run/rabbitmq/ca.crt
+    volumes:
+      - type: bind
+        source: ${SERVER_WORKER_TOKEN_PATH:-/missing/server-worker.token}
+        target: /run/credentials/token
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${SERVER_RABBITMQ_DIR:-/missing/server-rabbitmq}
+        target: /run/rabbitmq
+        read_only: true
+        bind: {create_host_path: false}
+volumes:
+  whisper-rabbitmq-data:

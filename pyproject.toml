@@ -15,6 +15,7 @@ opentelemetry-api = "^1.39"
 opentelemetry-sdk = "^1.39"
 opentelemetry-exporter-otlp-proto-grpc = "^1.39"
 opentelemetry-instrumentation-grpc = "^0.60b0"
+aio-pika = "10.2.1"
 
 [tool.poetry.group.dev.dependencies]
 grpcio-tools = ">=1.80,<1.81"

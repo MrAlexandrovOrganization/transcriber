@@ -55,6 +55,8 @@ class JobRecord:
     request_id: str = ""
     retain_until_ack: bool = False
     acknowledged_at: datetime | None = None
+    dispatch_id: str = ""
+    delivery_id: str = ""
 
     @property
     def segments(self) -> list[dict[str, float | str]]:
@@ -91,6 +93,11 @@ class JobStore:
         self._lease_seconds = int(os.getenv("JOB_LEASE_SECONDS", "900"))
         self._max_attempts = int(os.getenv("JOB_MAX_ATTEMPTS", "3"))
         self.worker_policies = parse_policies(os.getenv("WORKER_POLICIES", ""))
+        self.queue_backend = os.getenv("QUEUE_BACKEND", "postgres")
+        if self.queue_backend not in {"postgres", "rabbitmq"}:
+            raise ValueError("QUEUE_BACKEND must be postgres or rabbitmq")
+        if self.queue_backend == "rabbitmq" and not self.worker_policies:
+            raise ValueError("RabbitMQ requires explicit WORKER_POLICIES")
         self._demand_ttl_seconds = int(os.getenv("WORKER_DEMAND_TTL_S", "10"))
         if not 5 <= self._demand_ttl_seconds <= 60:
             raise ValueError("WORKER_DEMAND_TTL_S must be within 5..60")
@@ -137,8 +144,11 @@ class JobStore:
             conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
             conn.execute("SET LOCAL statement_timeout = '3s'")
             return {
-                name: conn.execute(_sql("metrics_" + name)).fetchall()
-                for name in ("jobs", "workers", "running", "observations")
+                name: conn.execute(
+                    _sql("metrics_" + name),
+                    (self.queue_backend == "rabbitmq",) if name == "outbox" else None,
+                ).fetchall()
+                for name in ("jobs", "workers", "running", "observations", "outbox")
             }
 
     def init_schema(self) -> None:
@@ -161,6 +171,8 @@ class JobStore:
                         "INSERT INTO transcriber_schema_migrations (version) VALUES (%s)",
                         (migration.name,),
                     )
+            if self.queue_backend == "rabbitmq":
+                conn.execute(_sql("broker_seed"))
 
     def create_job(
         self,
@@ -328,10 +340,123 @@ class JobStore:
                     (job_id,),
                 )
                 row = cur.fetchone()
+                if row is not None and self.queue_backend == "rabbitmq":
+                    self._enqueue(conn, job_id)
             conn.commit()
         if row is None:
             return None
         return int(row["queue_position"])
+
+    def _enqueue(self, conn, job_id: str, delay: int = 0) -> None:
+        message_id = str(uuid.uuid4())
+        conn.execute(
+            _sql("dispatch"),
+            (message_id, job_id),
+        )
+        conn.execute(
+            _sql("outbox_insert"),
+            (message_id, job_id, delay),
+        )
+
+    def publish_next(self, publish) -> bool:
+        """Confirm with RabbitMQ before committing. An ambiguous commit may duplicate."""
+        with self.connect() as conn:
+            conn.execute("SET LOCAL statement_timeout = '15s'")
+            row = conn.execute(_sql("outbox_next")).fetchone()
+            if row is None:
+                return False
+            publish(row["job_id"], row["message_id"])
+            conn.execute(
+                _sql("outbox_published"),
+                (row["message_id"],),
+            )
+        return True
+
+    def register_consumer(self, worker_id: str, instance_id: str) -> int | None:
+        policy = self.worker_policies.get(worker_id)
+        if (
+            self.queue_backend != "rabbitmq"
+            or not policy
+            or policy["max_concurrency"] == 0
+        ):
+            return None
+        with self.connect() as conn:
+            conn.execute(_sql("scheduler_lock"))
+            row = conn.execute(
+                _sql("broker_admit"),
+                (
+                    worker_id,
+                    worker_id,
+                    instance_id,
+                    policy["max_concurrency"],
+                    worker_id,
+                    instance_id,
+                ),
+            ).fetchone()
+        return 10000 - policy["priority"] if row else None
+
+    def begin_attempt(self, worker_id, instance_id, job_id, message_id, delivery_id):
+        """Fence one broker delivery; neither chooses a job nor ranks workers."""
+        with self.connect() as conn:
+            conn.execute(_sql("scheduler_lock"))
+            row = conn.execute(
+                _sql("broker_job"),
+                (job_id,),
+            ).fetchone()
+            if (
+                not row
+                or row["dispatch_id"] != message_id
+                or row["status"] in {"done", "failed"}
+            ):
+                return "discard", None
+            if row["status"] == "running" and row["live"]:
+                if (
+                    row["delivery_id"] == delivery_id
+                    and row["assigned_worker_id"] == worker_id
+                    and row["assigned_instance_id"] == instance_id
+                ):
+                    return "started", ClaimedJob(
+                        self._row_to_job(row),
+                        row["lease_owner"],
+                        row["lease_expires_at"],
+                    )
+                return "busy", None
+            if row["status"] not in {"queued", "running"}:
+                return "discard", None
+            if row["attempts"] >= row["max_attempts"]:
+                conn.execute(
+                    _sql("broker_exhausted"),
+                    (job_id,),
+                )
+                return "discard", None
+            policy = self.worker_policies.get(worker_id)
+            if not policy or policy["max_concurrency"] == 0:
+                return "busy", None
+            capacity = conn.execute(
+                _sql("broker_capacity"),
+                (worker_id, instance_id, worker_id, instance_id, worker_id),
+            ).fetchone()
+            if (
+                not capacity["ready"]
+                or capacity["busy"]
+                or capacity["active"] >= policy["max_concurrency"]
+            ):
+                return "busy", None
+            lease_owner = f"{worker_id}/{uuid.uuid4()}"
+            row = conn.execute(
+                _sql("broker_start"),
+                (
+                    lease_owner,
+                    self._lease_seconds,
+                    worker_id,
+                    instance_id,
+                    delivery_id,
+                    job_id,
+                ),
+            ).fetchone()
+            return "started", ClaimedJob(
+                self._row_to_job(row), lease_owner, row["lease_expires_at"]
+            )
 
     def get_job(self, job_id: str) -> JobRecord | None:
         with self.connect() as conn:
@@ -389,6 +514,8 @@ class JobStore:
     def claim_next_job(
         self, worker_id: str, *, fallback: bool = False, instance_id: str = ""
     ) -> ClaimedJob | None:
+        if self.queue_backend == "rabbitmq":
+            raise ValueError("SQL claiming is disabled; use RabbitMQ consumers")
         # Fence each attempt independently, even across worker restarts/PID reuse.
         lease_owner = f"{worker_id}/{uuid.uuid4()}"
         with self.connect() as conn:
@@ -502,6 +629,15 @@ class JobStore:
                     (retryable, error, retryable, job_id, worker_id, worker_id),
                 )
                 accepted = cur.rowcount == 1
+                if accepted and self.queue_backend == "rabbitmq":
+                    row = conn.execute(
+                        _sql("retry_status"),
+                        (job_id,),
+                    ).fetchone()
+                    if row["status"] == "queued":
+                        self._enqueue(
+                            conn, job_id, min(300, 2 ** min(row["attempts"], 8))
+                        )
             conn.commit()
         return accepted
 
@@ -570,4 +706,6 @@ class JobStore:
             request_id=row["request_id"],
             retain_until_ack=row["retain_until_ack"],
             acknowledged_at=row["acknowledged_at"],
+            dispatch_id=row.get("dispatch_id", ""),
+            delivery_id=row.get("delivery_id", ""),
         )

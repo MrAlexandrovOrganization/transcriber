@@ -1,5 +1,10 @@
 # Pool priorities and shared-model workers
 
+For RabbitMQ delivery, see [transport, admission and rollout](rabbitmq.md).
+Execution slots, model sharing and coordinator pool limits remain unchanged.
+The SQL FIFO/Claim scheduler described below applies to legacy/rollback mode;
+RabbitMQ mode uses direct subscriptions with the same pool priority order.
+
 `worker_id` identifies a pool, such as `wsl-cpu`. Each execution slot has a fresh
 UUID in `instance_id`, its own job, lease token, heartbeat and temporary audio.
 Several slots can share one process and one loaded model. A process restart

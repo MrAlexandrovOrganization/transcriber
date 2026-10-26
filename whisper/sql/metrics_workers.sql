@@ -1,7 +1,7 @@
 WITH availability AS (
     SELECT worker_id, BOOL_OR(ready_until > NOW()) AS online,
         COUNT(*) FILTER (WHERE ready_until > NOW()) AS instances,
-        COUNT(*) FILTER (WHERE ready_until > NOW() AND demand_until > NOW()
+        COUNT(*) FILTER (WHERE ready_until > NOW() AND (demand_until > NOW() OR consumer_until > NOW())
             AND NOT EXISTS (
                 SELECT 1 FROM transcription_jobs AS jobs
                 WHERE jobs.status = 'running' AND jobs.lease_expires_at > NOW()

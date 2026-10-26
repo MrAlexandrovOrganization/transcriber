@@ -42,7 +42,7 @@ class ContainerHealthTests(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which("docker"), "Docker CLI required for Compose checks")
 class ComposeTests(unittest.TestCase):
-    def compose(self, profiles, autodeploy=False):
+    def compose(self, profiles, autodeploy=False, wsl_direct=False):
         with tempfile.TemporaryDirectory() as temp:
             env_file = Path(temp) / "synthetic.env"
             env_file.write_text(
@@ -89,6 +89,8 @@ class ComposeTests(unittest.TestCase):
             ]
             if autodeploy:
                 command[6:6] = ["-f", "compose/workers.autodeploy.yml"]
+            if wsl_direct:
+                command[6:6] = ["-f", "compose/workers.wsl-gpu.yml"]
             result = subprocess.run(
                 command,
                 cwd=ROOT,
@@ -158,6 +160,43 @@ class ComposeTests(unittest.TestCase):
             ["gpu"],
         )
         self.assertNotEqual(cpu["volumes"][1]["source"], gpu["volumes"][1]["source"])
+
+    def test_wsl_direct_gpu_preserves_hardening_and_cpu_configuration(self):
+        for autodeploy in (False, True):
+            with self.subTest(autodeploy=autodeploy):
+                normal = self.compose("cpu,gpu", autodeploy=autodeploy)["services"]
+                direct = self.compose(
+                    "cpu,gpu", autodeploy=autodeploy, wsl_direct=True
+                )["services"]
+                self.assertEqual(normal["worker-cpu"], direct["worker-cpu"])
+                gpu = direct["worker-gpu"]
+                reservations = (
+                    gpu.get("deploy", {}).get("resources", {}).get("reservations", {})
+                )
+                self.assertFalse(reservations.get("devices"))
+                self.assertEqual(len(gpu["devices"]), 1)
+                self.assertEqual(gpu["devices"][0]["source"], "/dev/dxg")
+                self.assertEqual(gpu["devices"][0]["target"], "/dev/dxg")
+                for key in (
+                    "user",
+                    "read_only",
+                    "cap_drop",
+                    "security_opt",
+                    "cpus",
+                    "mem_limit",
+                ):
+                    self.assertEqual(gpu[key], normal["worker-gpu"][key])
+                mounts = {volume["target"]: volume for volume in gpu["volumes"]}
+                for path in ("/usr/lib/wsl/lib", "/usr/lib/wsl/drivers"):
+                    self.assertEqual(mounts[path]["source"], path)
+                    self.assertTrue(mounts[path]["read_only"])
+                    self.assertFalse(
+                        mounts[path]["bind"].get("create_host_path", False)
+                    )
+                    self.assertEqual(mounts[path]["bind"]["propagation"], "rprivate")
+                # Serialized config retains escapes for expansion in the image.
+                self.assertIn("$$LD_LIBRARY_PATH", gpu["entrypoint"][2])
+                self.assertIn('exec "$$@"', gpu["entrypoint"][2])
 
 
 if __name__ == "__main__":

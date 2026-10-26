@@ -1,5 +1,10 @@
 # Worker gRPC over Caddy TLS
 
+For RabbitMQ delivery, see [transport, admission and rollout](rabbitmq.md).
+Execution slots, model sharing and coordinator pool limits remain unchanged.
+The SQL FIFO/Claim scheduler described below applies to legacy/rollback mode;
+RabbitMQ mode uses direct subscriptions with the same pool priority order.
+
 ## Architecture
 
 Mac/WSL workers open outbound HTTP/2 gRPC connections to the Caddy hostname on

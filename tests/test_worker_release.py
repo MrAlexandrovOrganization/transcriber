@@ -145,6 +145,42 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(new["Labels"]["com.docker.compose.image"], "new-image")
         self.assertEqual(old, before)
 
+    def test_wsl_gpu_replacement_keeps_wrapper_and_uses_new_image_libraries(self):
+        old = container()
+        wrapper = [
+            "/bin/sh",
+            "-c",
+            'export LD_LIBRARY_PATH="/usr/lib/wsl/lib:$LD_LIBRARY_PATH"; exec "$@"',
+            "--",
+        ]
+        old["Config"]["Entrypoint"] = wrapper
+        old["Config"]["Cmd"] = ["python", "-m", "whisper.remote_worker"]
+        old["Config"]["Env"].append("LD_LIBRARY_PATH=/old-image/cuda")
+        old["HostConfig"]["DeviceRequests"] = []
+        old["HostConfig"]["Devices"] = [
+            {
+                "PathOnHost": "/dev/dxg",
+                "PathInContainer": "/dev/dxg",
+                "CgroupPermissions": "rwm",
+            }
+        ]
+        defaults = {
+            "Entrypoint": None,
+            "Cmd": old["Config"]["Cmd"],
+            "Env": ["LD_LIBRARY_PATH=/old-image/cuda"],
+        }
+        new = replacement(
+            old,
+            IMAGE,
+            "new-image",
+            defaults,
+            {"Env": ["LD_LIBRARY_PATH=/new-image/cuda"]},
+        )
+        self.assertEqual(new["Entrypoint"], wrapper)
+        self.assertEqual(new["HostConfig"], old["HostConfig"])
+        self.assertNotIn("LD_LIBRARY_PATH=/old-image/cuda", new["Env"])
+        self.assertNotIn("Cmd", new)  # Let the replacement image supply its command.
+
     def test_recovery_rolls_back_unhealthy_replacement_and_quarantines_it(self):
         with tempfile.TemporaryDirectory() as temp:
             old = container(name="/workers-worker-cpu-1-rollback-old")

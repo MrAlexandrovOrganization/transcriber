@@ -57,6 +57,11 @@ class WorkerServicer(rpc.WorkerServiceServicer):
 
     def Claim(self, request, context):
         self._authenticate(context, worker_id=request.worker_id)
+        if self._store.queue_backend == "rabbitmq":
+            context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION,
+                "Use RabbitMQ delivery and BeginAttempt",
+            )
         if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", request.worker_id):
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, "Invalid worker ID")
         if request.instance_id:
@@ -72,6 +77,9 @@ class WorkerServicer(rpc.WorkerServiceServicer):
         )
         if claimed is None:
             return pb.WorkerClaimResponse()
+        return self._claim_response(claimed, context)
+
+    def _claim_response(self, claimed, context):
         job = claimed.job
         try:
             size = Path(job.input_path).stat().st_size
@@ -84,9 +92,8 @@ class WorkerServicer(rpc.WorkerServiceServicer):
             )
             context.abort(grpc.StatusCode.FAILED_PRECONDITION, "Input is unavailable")
         logger.info(
-            "Worker claimed job: worker=%s slot=%s job=%s attempt=%d",
-            request.worker_id,
-            request.instance_id,
+            "Worker began job: worker=%s job=%s attempt=%d",
+            job.lease_owner.split("/")[0],
             job.job_id,
             job.attempts,
         )
@@ -103,6 +110,49 @@ class WorkerServicer(rpc.WorkerServiceServicer):
             input_size=size,
             traceparent=job.traceparent,
             tracestate=job.tracestate,
+        )
+
+    def _consumer_identity(self, request, context):
+        self._authenticate(context, worker_id=request.worker_id)
+        try:
+            if str(uuid.UUID(request.instance_id)) != request.instance_id:
+                raise ValueError()
+        except ValueError:
+            context.abort(
+                grpc.StatusCode.INVALID_ARGUMENT, "Invalid worker instance ID"
+            )
+        if self._store.queue_backend != "rabbitmq":
+            context.abort(
+                grpc.StatusCode.FAILED_PRECONDITION, "RabbitMQ is not enabled"
+            )
+
+    def RegisterConsumer(self, request, context):
+        self._consumer_identity(request, context)
+        priority = self._store.register_consumer(request.worker_id, request.instance_id)
+        return pb.WorkerConsumerResponse(
+            admitted=priority is not None, priority=priority or 0
+        )
+
+    def BeginAttempt(self, request, context):
+        self._consumer_identity(request, context)
+        for value in (request.job_id, request.message_id, request.delivery_id):
+            try:
+                if str(uuid.UUID(value)) != value:
+                    raise ValueError()
+            except ValueError:
+                context.abort(
+                    grpc.StatusCode.INVALID_ARGUMENT, "Invalid delivery identity"
+                )
+        disposition, claimed = self._store.begin_attempt(
+            request.worker_id,
+            request.instance_id,
+            request.job_id,
+            request.message_id,
+            request.delivery_id,
+        )
+        return pb.WorkerBeginResponse(
+            disposition=disposition,
+            job=self._claim_response(claimed, context) if claimed else None,
         )
 
     def ReportAvailability(self, request, context):

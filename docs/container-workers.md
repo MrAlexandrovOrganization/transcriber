@@ -1,5 +1,10 @@
 # Container workers and per-machine configuration
 
+For RabbitMQ delivery, see [transport, admission and rollout](rabbitmq.md).
+Execution slots, model sharing and coordinator pool limits remain unchanged.
+The SQL FIFO/Claim scheduler described below applies to legacy/rollback mode;
+RabbitMQ mode uses direct subscriptions with the same pool priority order.
+
 The application and checkout are the same on every machine. The ignored `.env`
 selects the role, worker profiles, models, credentials and resource limits.
 Workers connect directly to Caddy with gRPC/TLS; no SSH sidecar or native

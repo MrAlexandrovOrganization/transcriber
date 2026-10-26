@@ -94,6 +94,21 @@ def render_metrics(snapshot: dict, workers: dict[str, str], policies=None) -> by
         sample(name, value)
 
     availability = {row["worker_id"]: row for row in snapshot["workers"]}
+    outbox = (snapshot.get("outbox") or [{}])[0]
+    for name, key, help_text in (
+        (
+            "outbox_pending",
+            "pending",
+            "Ready outbox messages awaiting confirmed RabbitMQ publication.",
+        ),
+        (
+            "outbox_oldest_seconds",
+            "oldest_seconds",
+            "Age of the oldest ready unpublished outbox message.",
+        ),
+    ):
+        definition(name, "gauge", help_text)
+        sample(name, outbox.get(key, 0))
     running = {row["worker_id"]: row for row in snapshot["running"]}
     worker_metrics = {
         "worker_online": "At least one unexpired ready report exists for this worker ID.",
@@ -118,7 +133,7 @@ def render_metrics(snapshot: dict, workers: dict[str, str], policies=None) -> by
         definition(
             "worker_free_slots",
             "gauge",
-            "Ready idle slots with fresh work requests, bounded by remaining pool capacity.",
+            "Ready idle slots with fresh work requests or RabbitMQ admission, bounded by pool capacity.",
         )
     for worker_id, role in sorted(workers.items()):
         row = availability.get(worker_id, {})

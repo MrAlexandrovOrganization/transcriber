@@ -4,6 +4,7 @@ ENV_FILE ?= .env
 MONITORING_DATA_DIR ?= $(HOME)/.monitoring
 export MONITORING_DATA_DIR
 TRANSCRIBER_ROLE ?= $(or $(shell sed -n 's/^TRANSCRIBER_ROLE=//p' $(ENV_FILE) 2>/dev/null),server)
+WORKER_GPU_RUNTIME ?= $(or $(shell sed -n 's/^WORKER_GPU_RUNTIME=//p' $(ENV_FILE) 2>/dev/null),nvidia)
 WORKER_AUTODEPLOY ?= $(or $(shell sed -n 's/^WORKER_AUTODEPLOY=//p' $(ENV_FILE) 2>/dev/null),0)
 WORKER_REGISTRY ?= ghcr.io/mralexandrovorganization/transcriber
 export WORKER_REGISTRY
@@ -23,12 +24,23 @@ endif
 ifneq ($(filter-out 0 1,$(strip $(WORKER_TLS_ENABLED))),)
 $(error WORKER_TLS_ENABLED must be an unquoted 0 or 1)
 endif
+QUEUE_BACKEND ?= $(or $(shell sed -n 's/^QUEUE_BACKEND=//p' $(ENV_FILE) 2>/dev/null),postgres)
+ifneq ($(filter-out postgres rabbitmq,$(strip $(QUEUE_BACKEND))),)
+$(error QUEUE_BACKEND must be postgres or rabbitmq)
+endif
+ifneq ($(filter-out nvidia wsl-direct,$(strip $(WORKER_GPU_RUNTIME))),)
+$(error WORKER_GPU_RUNTIME must be an unquoted nvidia or wsl-direct)
+endif
 # Keep paths, default project name and volumes anchored to the checkout root.
 COMPOSE_FILES = -f compose/server.yml
 IMAGE_COMPOSE_FILES = compose/server.yml
 ifeq ($(strip $(TRANSCRIBER_ROLE)),workers)
 COMPOSE_FILES = -f compose/workers.yml
 IMAGE_COMPOSE_FILES = compose/workers.yml
+ifeq ($(strip $(WORKER_GPU_RUNTIME)),wsl-direct)
+COMPOSE_FILES += -f compose/workers.wsl-gpu.yml
+IMAGE_COMPOSE_FILES += compose/workers.wsl-gpu.yml
+endif
 ifeq ($(strip $(WORKER_AUTODEPLOY)),1)
 COMPOSE_FILES += -f compose/workers.autodeploy.yml
 IMAGE_COMPOSE_FILES += compose/workers.autodeploy.yml
@@ -45,6 +57,15 @@ SERVER_OVERLAY ?= $(shell sed -n 's/^SERVER_OVERLAY=//p' $(ENV_FILE) 2>/dev/null
 ifneq ($(strip $(SERVER_OVERLAY)),)
 COMPOSE_FILES += -f $(SERVER_OVERLAY)
 IMAGE_COMPOSE_FILES += $(SERVER_OVERLAY)
+endif
+ifeq ($(strip $(QUEUE_BACKEND)),rabbitmq)
+ifeq ($(strip $(TRANSCRIBER_ROLE)),workers)
+COMPOSE_FILES += -f compose/workers.rabbitmq.yml
+IMAGE_COMPOSE_FILES += compose/workers.rabbitmq.yml
+else
+COMPOSE_FILES += -f compose/rabbitmq.yml
+IMAGE_COMPOSE_FILES += compose/rabbitmq.yml
+endif
 endif
 export IMAGE_COMPOSE_FILES
 export IMAGE_RUNTIME_ENV_FILE := $(ENV_FILE)
@@ -160,6 +181,9 @@ image-publish:
 	python3 scripts/images.py publish
 
 image-deploy:
+ifeq ($(strip $(TRANSCRIBER_ROLE)):$(strip $(QUEUE_BACKEND)),server:rabbitmq)
+	$(DOCKER_COMPOSE) pull rabbitmq
+endif
 	python3 scripts/images.py deploy
 
 image-activate:
@@ -204,6 +228,42 @@ test-db-down:
 		docker stop transcriber-ci-test-db; \
 	fi
 
+test-rabbit-up:
+	docker run --rm -d --name transcriber-ci-test-rabbitmq --label purpose=transcriber-ci-test-rabbitmq \
+		--memory=512m --cpus=1 -e RABBITMQ_DEFAULT_USER=pilot \
+		-e RABBITMQ_DEFAULT_PASS=synthetic-rabbit-password-for-isolated-tests \
+		-e RABBITMQ_DEFAULT_VHOST=transcriber_pilot \
+		-p 127.0.0.1:56739:5672 rabbitmq:$(RABBITMQ_VERSION)
+	@for attempt in $$(seq 1 45); do \
+		docker exec transcriber-ci-test-rabbitmq rabbitmq-diagnostics -q check_running >/dev/null 2>&1 && break; \
+		sleep 1; \
+	done
+	docker exec transcriber-ci-test-rabbitmq rabbitmqctl set_policy -p transcriber_pilot test-retry \
+		'^transcriber\..*\.retry$$' '{"dead-letter-strategy":"at-least-once","overflow":"reject-publish"}' --apply-to quorum_queues
+	python3 scripts/test_rabbit_config.py
+
+test-rabbit-down:
+	@if [ "$$(docker inspect --format '{{ index .Config.Labels "purpose" }}' transcriber-ci-test-rabbitmq 2>/dev/null)" = 'transcriber-ci-test-rabbitmq' ]; then \
+		docker stop transcriber-ci-test-rabbitmq; \
+	fi
+
+test-broker:
+	@test -n "$(TRANSCRIBER_TEST_DATABASE_URL)" -a -n "$(TRANSCRIBER_TEST_RABBITMQ_FILE)" || (echo 'Set isolated PostgreSQL and RabbitMQ test configuration'; exit 1)
+	poetry run python -m unittest discover -s tests -p test_broker.py -v
+
+.PHONY: test-rabbit-up test-rabbit-down test-broker
+
+test-broker-tls-docker:
+	poetry run python -m scripts.smoke_broker_tls
+
+.PHONY: test-broker-tls-docker
+
+rabbit-reconcile:
+	@test '$(TRANSCRIBER_ROLE):$(QUEUE_BACKEND)' = server:rabbitmq || (echo 'Requires server RabbitMQ mode'; exit 1)
+	$(DOCKER_COMPOSE) exec -T whisper-ingress python -m whisper.reconcile
+
+.PHONY: rabbit-reconcile
+
 config-check:
 	$(DOCKER_COMPOSE) config --quiet
 ifeq ($(strip $(TRANSCRIBER_ROLE)),workers)
@@ -211,9 +271,14 @@ ifeq ($(strip $(TRANSCRIBER_ROLE)),workers)
 endif
 
 config-check-examples:
+	$(MAKE) ENV_FILE=.env.wsl.example WORKER_GPU_RUNTIME=wsl-direct config-check
 	$(MAKE) ENV_FILE=.env.mac.example TRANSCRIBER_ROLE=workers config-check
 	$(MAKE) ENV_FILE=.env.wsl.example TRANSCRIBER_ROLE=workers config-check
 	$(MAKE) ENV_FILE=.env.server.example TRANSCRIBER_ROLE=server WORKER_TLS_ENABLED=1 config-check
+	$(MAKE) ENV_FILE=.env.server.example QUEUE_BACKEND=rabbitmq RABBITMQ_CONFIG_DIR=/synthetic/rabbitmq/server RABBITMQ_PUBLISHER_DIR=/synthetic/rabbitmq/publisher config-check
+	$(MAKE) ENV_FILE=.env.wsl.example WORKER_GPU_RUNTIME=wsl-direct QUEUE_BACKEND=rabbitmq CPU_RABBITMQ_DIR=/synthetic/rabbitmq/cpu GPU_RABBITMQ_DIR=/synthetic/rabbitmq/gpu config-check
+	$(MAKE) ENV_FILE=.env.mac.example QUEUE_BACKEND=rabbitmq CPU_RABBITMQ_DIR=/synthetic/rabbitmq/mac config-check
+	$(MAKE) ENV_FILE=.env.wsl.example QUEUE_BACKEND=rabbitmq CPU_RABBITMQ_DIR=/synthetic/rabbitmq/cpu GPU_RABBITMQ_DIR=/synthetic/rabbitmq/gpu config-check
 
 check: proto-gen proto-check config-check config-check-examples monitoring-check forwarder-check
 	poetry run ruff check whisper tests scripts

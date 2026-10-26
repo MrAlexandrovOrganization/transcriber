@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import ipaddress
 import logging
@@ -49,6 +50,9 @@ class Config:
     shutdown_grace: float = 10.0
     health_file: str = ""
     concurrency: int = 1
+    broker_file: str = ""
+    broker_ca_file: str = ""
+    max_task_seconds: float = 21600.0
 
     def __post_init__(self):
         worker_concurrency(str(self.concurrency))
@@ -79,6 +83,7 @@ class Config:
                 self.download_timeout,
                 self.max_input_bytes,
                 self.shutdown_grace,
+                self.max_task_seconds,
             )
         ):
             raise ValueError("Worker limits must be finite and positive")
@@ -112,6 +117,9 @@ class Config:
             shutdown_grace=float(os.getenv("REMOTE_WORKER_SHUTDOWN_GRACE_S", "10")),
             health_file=os.getenv("REMOTE_WORKER_HEALTH_FILE", ""),
             concurrency=worker_concurrency(os.getenv("WORKER_CONCURRENCY", "1")),
+            broker_file=os.getenv("RABBITMQ_CONNECTION_FILE", ""),
+            broker_ca_file=os.getenv("RABBITMQ_CA_FILE", ""),
+            max_task_seconds=float(os.getenv("REMOTE_WORKER_MAX_TASK_S", "21600")),
         )
 
 
@@ -158,6 +166,10 @@ class RemoteWorker:
         self._metadata = (("authorization", "Bearer " + token),)
         self._lifecycle = lifecycle
         self._availability_lock = threading.Lock()
+        self._broker_lost = threading.Event()
+        self._broker_connected = threading.Event()
+        self._broker_priority = 0
+        self._broker_admitted = threading.Event()
 
     def _health(self, ready):
         if self._lifecycle is None:
@@ -180,6 +192,13 @@ class RemoteWorker:
     def run_forever(self):
         failures = 0
         reporter = None
+        broker = None
+        if self.config.broker_file:
+            from whisper.broker import BrokerConfig
+
+            broker = BrokerConfig.from_file(
+                self.config.broker_file, self.config.broker_ca_file
+            )
         try:
             while not self.stop.is_set():
                 try:
@@ -222,18 +241,27 @@ class RemoteWorker:
                         break
                     if self.drain.is_set():
                         continue
-                    claim = self._call(
-                        self.stub.Claim,
-                        pb.WorkerClaimRequest(
-                            worker_id=self.config.worker_id,
-                            instance_id=self.instance_id,
-                        ),
-                    )
-                    failures = 0
-                    if claim.job_id:
-                        self.process(claim)
+                    if broker:
+                        if not self._broker_admitted.is_set():
+                            self.stop.wait(self.config.poll_interval)
+                            continue
+                        from whisper.broker import consume_slot
+
+                        asyncio.run(consume_slot(self, broker))
+                        self.stop.wait(1)
                     else:
-                        self.stop.wait(self.config.poll_interval)
+                        claim = self._call(
+                            self.stub.Claim,
+                            pb.WorkerClaimRequest(
+                                worker_id=self.config.worker_id,
+                                instance_id=self.instance_id,
+                            ),
+                        )
+                        failures = 0
+                        if claim.job_id:
+                            self.process(claim)
+                        else:
+                            self.stop.wait(self.config.poll_interval)
                 except grpc.RpcError:
                     failures += 1
                     delay = min(60.0, 2.0 ** min(failures, 6)) * random.uniform(
@@ -271,7 +299,29 @@ class RemoteWorker:
             )
             if not response.accepted or response.ttl_seconds < 30:
                 raise ValueError("Coordinator rejected worker availability")
-            self._health(ready)
+            if ready and self.config.broker_file:
+                consumer = self._call(
+                    self.stub.RegisterConsumer,
+                    pb.WorkerClaimRequest(
+                        worker_id=self.config.worker_id,
+                        instance_id=self.instance_id,
+                    ),
+                )
+                if consumer.admitted:
+                    self._broker_admitted.set()
+                else:
+                    self._broker_admitted.clear()
+                self._broker_priority = consumer.priority
+            self._health(
+                ready
+                and (
+                    not self.config.broker_file
+                    or (
+                        self._broker_connected.is_set()
+                        and self._broker_admitted.is_set()
+                    )
+                )
+            )
             return min(20.0, response.ttl_seconds / 3.0)
 
     def _report_availability_loop(self, interval):
@@ -294,10 +344,11 @@ class RemoteWorker:
 
     def process(self, claim):
         if self.stop.is_set():
-            return
+            return False
         lease_lost = threading.Event()
         finished = threading.Event()
         progress = [0.0]
+        deadline = time.monotonic() + self.config.max_task_seconds
         request = pb.WorkerJobRequest(
             job_id=claim.job_id, lease_token=claim.lease_token
         )
@@ -309,7 +360,11 @@ class RemoteWorker:
             period = min(float(claim.lease_seconds) / 3.0, 30.0)
             next_heartbeat = 0.0
             while not finished.is_set():
-                if self.stop.is_set():
+                if (
+                    time.monotonic() >= deadline
+                    or self.stop.is_set()
+                    or (self.config.broker_file and self._broker_lost.is_set())
+                ):
                     lease_lost.set()
                     return
                 if time.monotonic() >= next_heartbeat:
@@ -342,15 +397,17 @@ class RemoteWorker:
                 kind=SpanKind.CONSUMER,
                 context=context_from_carrier(claim.traceparent, claim.tracestate),
             ):
-                self._process(request, claim, lease_lost, progress)
+                return self._process(request, claim, lease_lost, progress)
         except InferenceStopped:
             logger.info("Worker task stopped or lease lost")
+            return False
         except grpc.RpcError:
             logger.warning("Worker task connection interrupted; lease will expire")
+            return False
         except ValueError:
-            self._fail(request, lease_lost, "invalid_input", False)
+            return self._fail(request, lease_lost, "invalid_input", False)
         except Exception:
-            self._fail(request, lease_lost, "inference_failed", True)
+            return self._fail(request, lease_lost, "inference_failed", True)
         finally:
             finished.set()
             thread.join(timeout=self.config.rpc_timeout + 1.0)
@@ -410,13 +467,38 @@ class RemoteWorker:
                 self.config.worker_id,
                 claim.job_id,
             )
+            return ack.accepted
+
+    def _process_delivery(self, task):
+        request = pb.WorkerBeginRequest(
+            worker_id=self.config.worker_id,
+            instance_id=self.instance_id,
+            job_id=task["job_id"],
+            message_id=task["message_id"],
+            delivery_id=str(uuid.uuid4()),
+        )
+        # Retrying the same delivery identity recovers a lost BeginAttempt reply.
+        for attempt in range(2):
+            try:
+                response = self._call(self.stub.BeginAttempt, request)
+                break
+            except grpc.RpcError:
+                if attempt or self.stop.is_set():
+                    return "unsettled"
+        if response.disposition == "discard":
+            return "settled"
+        if response.disposition == "busy":
+            return "busy"
+        if response.disposition != "started" or not response.job.job_id:
+            return "unsettled"
+        return "settled" if self.process(response.job) else "unsettled"
 
     def _fail(self, request, lease_lost, code, retryable):
         if lease_lost.is_set() or self.stop.is_set():
-            return
+            return False
         logger.warning("Worker task failed (%s)", code)
         try:
-            self._call(
+            ack = self._call(
                 self.stub.Fail,
                 pb.WorkerFailRequest(
                     job_id=request.job_id,
@@ -425,8 +507,10 @@ class RemoteWorker:
                     retryable=retryable,
                 ),
             )
+            return ack.accepted
         except grpc.RpcError:
             logger.warning("Worker failure acknowledgement unavailable")
+            return False
 
 
 class RemoteWorkerPool:

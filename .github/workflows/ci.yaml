@@ -38,16 +38,23 @@ jobs:
         env:
           PROTO_BREAKING_AGAINST: .git#ref=${{ github.event.pull_request.base.sha || github.event.before }},subdir=proto
       - name: Start isolated test database
-        run: make test-db-up
+        run: make test-db-up test-rabbit-up
       - name: Check real PostgreSQL and worker RPCs
         run: make test-integration
         env:
           TRANSCRIBER_TEST_DATABASE_URL: postgresql://pilot:synthetic-ci-password@127.0.0.1:55439/transcriber_pilot
-      - name: Stop isolated test database
+      - name: Check RabbitMQ delivery, priorities, capacity and durable API
+        run: make test-broker
+        env:
+          TRANSCRIBER_TEST_DATABASE_URL: postgresql://pilot:synthetic-ci-password@127.0.0.1:55439/transcriber_pilot
+          TRANSCRIBER_TEST_RABBITMQ_FILE: .test-rabbitmq.json
+      - name: Stop isolated broker fixtures
         if: always()
-        run: make test-db-down
+        run: make test-rabbit-down test-db-down
       - name: Verify real Caddy TLS and scoped worker RPCs
         run: make test-worker-tls-docker
+      - name: Verify RabbitMQ TLS, credentials and safe deferred delivery
+        run: make test-broker-tls-docker
       - name: Verify real Docker update and rollback
         run: make test-updater-docker
       - name: Build CPU and CUDA images without production credentials

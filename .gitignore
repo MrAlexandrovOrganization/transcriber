@@ -12,3 +12,5 @@ bot/gen/
 .worker-release.env
 .worker-release.tmp
 /.images/
+
+.test-rabbitmq.json

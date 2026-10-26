@@ -30,6 +30,29 @@ service WorkerService {
   rpc Heartbeat(WorkerHeartbeatRequest) returns (WorkerAck);
   rpc Complete(WorkerCompleteRequest) returns (WorkerAck);
   rpc Fail(WorkerFailRequest) returns (WorkerAck);
+  // RabbitMQ consumers obtain operator-owned priority and a bounded pool slot.
+  rpc RegisterConsumer(WorkerClaimRequest) returns (WorkerConsumerResponse);
+  // Start only the specific job delivered by RabbitMQ; never selects queue work.
+  rpc BeginAttempt(WorkerBeginRequest) returns (WorkerBeginResponse);
+}
+
+message WorkerConsumerResponse {
+  bool admitted = 1;
+  int32 priority = 2; // RabbitMQ order: larger numbers win.
+}
+
+message WorkerBeginRequest {
+  string worker_id = 1;
+  string instance_id = 2;
+  string job_id = 3;
+  string message_id = 4;
+  string delivery_id = 5; // Fresh UUID for this receipt; reuse on RPC retry.
+}
+
+message WorkerBeginResponse {
+  // started, busy (defer delivery), or discard (terminal/stale/unknown).
+  string disposition = 1;
+  WorkerClaimResponse job = 2;
 }
 
 message WorkerClaimRequest {

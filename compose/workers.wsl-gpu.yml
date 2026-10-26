@@ -1,0 +1,28 @@
+# WSL-only fallback for NVIDIA legacy-hook cgroup namespace failures.
+# Keep Docker's normal device cgroup, resource limits and container hardening.
+services:
+  worker-gpu:
+    deploy:
+      resources:
+        reservations:
+          devices: !reset []
+    devices:
+      - /dev/dxg:/dev/dxg
+    volumes:
+      - type: bind
+        source: /usr/lib/wsl/lib
+        target: /usr/lib/wsl/lib
+        read_only: true
+        bind: {create_host_path: false, propagation: rprivate}
+      - type: bind
+        source: /usr/lib/wsl/drivers
+        target: /usr/lib/wsl/drivers
+        read_only: true
+        bind: {create_host_path: false, propagation: rprivate}
+    # Extend the selected image's CUDA library path, including after autodeploy.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - 'export LD_LIBRARY_PATH="/usr/lib/wsl/lib$${LD_LIBRARY_PATH:+:$$LD_LIBRARY_PATH}"; exec "$$@"'
+      - --
+    command: [python, -m, whisper.remote_worker]

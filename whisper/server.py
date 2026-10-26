@@ -418,6 +418,21 @@ def run_ingress() -> None:
 
     store = JobStore()
     store.init_schema()
+    outbox_stop = threading.Event()
+    outbox_thread = None
+    if store.queue_backend == "rabbitmq":
+        from whisper.broker import BrokerConfig, publish_outbox
+
+        config = BrokerConfig.from_file(
+            os.getenv("RABBITMQ_CONNECTION_FILE", ""), os.getenv("RABBITMQ_CA_FILE", "")
+        )
+        outbox_thread = threading.Thread(
+            target=publish_outbox,
+            args=(store, config, outbox_stop),
+            name="rabbitmq-outbox",
+            daemon=True,
+        )
+        outbox_thread.start()
 
     port = os.getenv("GRPC_PORT", "50053")
     grpc_workers = int(os.getenv("GRPC_WORKERS", "4"))
@@ -452,6 +467,7 @@ def run_ingress() -> None:
     server.start()
 
     def stop_servers(*_):
+        outbox_stop.set()
         for worker_server in worker_servers:
             worker_server.stop(5)
         server.stop(5)
@@ -460,12 +476,19 @@ def run_ingress() -> None:
     signal.signal(signal.SIGINT, stop_servers)
     logger.info("Whisper ingress gRPC server started on port %s", port)
     server.wait_for_termination()
+    outbox_stop.set()
+    if outbox_thread:
+        outbox_thread.join(timeout=15)
     if metrics:
         metrics.close()
 
 
 def run_worker() -> None:
     store = JobStore()
+    if store.queue_backend == "rabbitmq":
+        raise ValueError(
+            "RabbitMQ workers must use whisper.remote_worker with scoped credentials"
+        )
     store.init_schema()
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())

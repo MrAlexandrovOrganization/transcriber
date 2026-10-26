@@ -1,0 +1,21 @@
+services:
+  worker-cpu:
+    environment:
+      RABBITMQ_CONNECTION_FILE: /run/rabbitmq/connection.json
+      RABBITMQ_CA_FILE: /run/rabbitmq/ca.crt
+    volumes:
+      - type: bind
+        source: ${CPU_RABBITMQ_DIR:-/missing/cpu-rabbitmq}
+        target: /run/rabbitmq
+        read_only: true
+        bind: {create_host_path: false}
+  worker-gpu:
+    environment:
+      RABBITMQ_CONNECTION_FILE: /run/rabbitmq/connection.json
+      RABBITMQ_CA_FILE: /run/rabbitmq/ca.crt
+    volumes:
+      - type: bind
+        source: ${GPU_RABBITMQ_DIR:-/missing/gpu-rabbitmq}
+        target: /run/rabbitmq
+        read_only: true
+        bind: {create_host_path: false}

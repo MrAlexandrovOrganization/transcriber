@@ -9,6 +9,12 @@ locally. Use `make build`/`make up`: Make exports versions to Compose build args
 
 Durable asynchronous Whisper transcription service.
 
+RabbitMQ delivery is implemented with a transactional outbox and direct TLS
+consumers on worker devices. Set `QUEUE_BACKEND=rabbitmq` in the coordinator
+and worker machine configurations after provisioning. Existing installations
+default to `postgres` for a coordinated rollout. Client RPCs and retention/Ack
+semantics are unchanged. See [RabbitMQ architecture, cutover and rollback](docs/rabbitmq.md).
+
 ## Compose configuration layout
 
 All Compose files live in `compose/`. Use the root `Makefile` as the entry point;
@@ -34,7 +40,10 @@ The directory move does not require editing machine `.env` files.
 - [`whisper-ingress`](compose/server.yml) accepts gRPC uploads and returns a `job_id` quickly.
 - Uploaded files are persisted to [`/data/jobs`](compose/server.yml) on a Docker volume.
 - Job metadata, status, retries, and worker leases are stored in Postgres.
-- [`whisper-worker`](compose/server.yml) claims jobs via Postgres using `FOR UPDATE SKIP LOCKED`.
+- In RabbitMQ mode an outbox publisher confirms durable messages to the broker;
+  admitted worker slots subscribe with prefetch one and operator-owned consumer
+  priorities. PostgreSQL stores attempt fencing and enforces global pool caps.
+- PostgreSQL claiming remains available only in explicit legacy/rollback mode.
 - A worker stores the final result before marking the job `done`; durable clients
   can separately acknowledge receipt with `Ack`.
 - If a worker dies before lease renewal, the job becomes claimable again and is retried.
@@ -114,6 +123,8 @@ and ledger rather than reversing migrations.
 ## Main environment variables
 
 - `DATABASE_URL`
+- `QUEUE_BACKEND=postgres|rabbitmq` — machine Compose selector; ingress transport
+- `RABBITMQ_CONNECTION_FILE`, `RABBITMQ_CA_FILE` — protected per-role connection and CA files
 - `JOB_STORAGE_DIR`
 - `JOB_MAX_ATTEMPTS`
 - `JOB_LEASE_SECONDS`
@@ -136,10 +147,12 @@ models and limits, prerequisites, readiness, CI and native-to-container migratio
 Native machine-specific SSH launchers have been removed. Use the same container
 worker configuration on Mac and WSL; CPU/GPU selection and models stay in `.env`.
 
-The existing PostgreSQL queue remains the source of truth. Remote workers use a
-separate, authenticated gRPC WorkerService to claim jobs, download audio, renew
-leases and return results. They need neither database credentials nor a shared
-filesystem. No worker endpoint is enabled by the normal deployment.
+PostgreSQL remains the source of truth for job status and results. In RabbitMQ
+mode remote workers receive messages directly from the broker, register a pool
+slot and begin the specific delivered attempt through authenticated WorkerService.
+Audio download, progress, attempt fencing and completion use the existing API.
+SQL-mode workers retain the old Claim loop for rollout/rollback. Workers need
+neither database credentials nor a shared filesystem.
 
 Start with a synthetic local experiment, using Python/Poetry at the versions
 from `makefiles/versions.mk`, Buf at `BUF_VERSION`, and Docker with the pinned PostgreSQL
