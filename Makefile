@@ -229,22 +229,25 @@ test-db-down:
 	fi
 
 test-rabbit-up:
-	docker run --rm -d --name transcriber-ci-test-rabbitmq --label purpose=transcriber-ci-test-rabbitmq \
+	docker run -d --name transcriber-ci-test-rabbitmq --label purpose=transcriber-ci-test-rabbitmq \
 		--memory=512m --cpus=1 -e RABBITMQ_DEFAULT_USER=pilot \
+		-e RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS='+S 2:2 +SDcpu 1 +SDio 1' \
+		-e RABBITMQ_CTL_ERL_ARGS='+S 1:1 +SDcpu 1 +SDio 1' \
 		-e RABBITMQ_DEFAULT_PASS=synthetic-rabbit-password-for-isolated-tests \
 		-e RABBITMQ_DEFAULT_VHOST=transcriber_pilot \
 		-p 127.0.0.1:56739:5672 rabbitmq:$(RABBITMQ_VERSION)
-	@for attempt in $$(seq 1 45); do \
-		docker exec transcriber-ci-test-rabbitmq rabbitmq-diagnostics -q check_running >/dev/null 2>&1 && break; \
+	@ready=0; for attempt in $$(seq 1 45); do \
+		docker exec transcriber-ci-test-rabbitmq rabbitmq-diagnostics -q check_running >/dev/null 2>&1 && { ready=1; break; }; \
+		[ "$$(docker inspect --format '{{.State.Running}}' transcriber-ci-test-rabbitmq)" = true ] || break; \
 		sleep 1; \
-	done
+	done; if [ "$$ready" != 1 ]; then docker logs --tail 80 transcriber-ci-test-rabbitmq; exit 1; fi
 	docker exec transcriber-ci-test-rabbitmq rabbitmqctl set_policy -p transcriber_pilot test-retry \
 		'^transcriber\..*\.retry$$' '{"dead-letter-strategy":"at-least-once","overflow":"reject-publish"}' --apply-to quorum_queues
 	python3 scripts/test_rabbit_config.py
 
 test-rabbit-down:
 	@if [ "$$(docker inspect --format '{{ index .Config.Labels "purpose" }}' transcriber-ci-test-rabbitmq 2>/dev/null)" = 'transcriber-ci-test-rabbitmq' ]; then \
-		docker stop transcriber-ci-test-rabbitmq; \
+		docker rm -f -v transcriber-ci-test-rabbitmq; \
 	fi
 
 test-broker:
