@@ -15,7 +15,7 @@ services:
         source: ${HEADSCALE_AUTHKEY_PATH:?Provision a per-device registration key}
         target: /run/secrets/headscale-auth
         read_only: true
-        bind: {create_host_path: false}
+        bind: {create_host_path: false, propagation: rprivate}
     devices: [/dev/net/tun:/dev/net/tun]
     cap_drop: [ALL]
     # DAC_OVERRIDE reads the host-owned 0600 registration file; workers get no caps.
