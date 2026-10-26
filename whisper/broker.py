@@ -270,6 +270,15 @@ async def consume_slot(worker, config):
                 message = await asyncio.wait_for(incoming.get(), timeout=0.25)
             except asyncio.TimeoutError:
                 continue
+            # Drain/withdrawal may arrive while awaiting a delivery. Closing the
+            # channel returns this unstarted message without consuming an attempt.
+            if (
+                worker.stop.is_set()
+                or worker.drain.is_set()
+                or not worker._available.is_set()
+                or not worker._broker_admitted.is_set()
+            ):
+                break
             try:
                 task = delivery(message.body, message.message_id)
             except ValueError:

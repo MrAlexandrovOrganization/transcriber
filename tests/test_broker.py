@@ -10,7 +10,9 @@ import time
 import unittest
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
+import aio_pika
 import grpc
 import test_worker_api as legacy
 
@@ -375,6 +377,48 @@ class RabbitIntegrationTests(unittest.TestCase):
         engine.gate.set()
         self.wait(lambda: self.store.get_job(job).status == "done")
         self.assertEqual(self.store.get_job(job).attempts, 1)
+
+    def test_drain_racing_with_delivery_does_not_start_a_new_attempt(self):
+        job = self.submit()
+        self.publish()
+        gate = threading.Event()
+        gate.set()
+        engine = GateEngine(gate)
+        drain = threading.Event()
+        consume = aio_pika.queue.Queue.consume
+
+        async def drain_on_delivery(queue, callback, *args, **kwargs):
+            async def received(message):
+                drain.set()  # SIGUSR1 just as the broker callback wakes the slot.
+                await callback(message)
+
+            return await consume(queue, received, *args, **kwargs)
+
+        config = Config(
+            f"127.0.0.1:{self.fixture.port}",
+            "/unused",
+            "wsl-cpu",
+            poll_interval=0.1,
+            rpc_timeout=5,
+            broker_file=str(self.connection_file),
+        )
+        pool = RemoteWorkerPool(
+            config,
+            self.fixture.stub,
+            engine,
+            self.fixture.token("wsl-cpu"),
+            drain=drain,
+        )
+        thread = threading.Thread(target=pool.run_forever, daemon=True)
+        self.pools.append((pool, thread))
+        with patch("aio_pika.queue.Queue.consume", new=drain_on_delivery):
+            thread.start()
+            self.wait(lambda: all(worker._drained.is_set() for worker in pool.workers))
+            self.assertEqual(self.store.get_job(job).attempts, 0)
+            self.assertEqual(self.store.get_job(job).status, "queued")
+            self.assertEqual(engine.calls, 0)
+        drain.clear()
+        self.wait(lambda: self.store.get_job(job).status == "done")
 
     def test_broker_redelivery_after_disconnect_and_completed_job_deduplication(self):
         job = self.submit()
