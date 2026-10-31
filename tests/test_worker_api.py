@@ -1,5 +1,6 @@
 """Real gRPC + PostgreSQL tests, always in a random isolated schema."""
 
+import errno
 import hashlib
 import os
 import tempfile
@@ -1200,6 +1201,154 @@ class WorkerAPITests(unittest.TestCase):
                 pb.AckRequest(job_id=job.job_id), timeout=5
             ).acknowledged
         )
+
+    def test_upload_at_limit_succeeds_and_next_byte_is_rejected(self):
+        with patch.dict(os.environ, {"MAX_AUDIO_BYTES": "4"}):
+            response = self.client_submit(request_id="limit:exact", audio=b"1234")
+            self.assertEqual(self.store.get_job(response.job_id).status, "queued")
+            with self.assertRaises(grpc.RpcError) as error:
+                self.client_stub.Submit(
+                    iter(
+                        [
+                            self.client_chunk(request_id="limit:over", audio=b"1234"),
+                            pb.TranscribeChunk(data=b"5"),
+                        ]
+                    ),
+                    timeout=5,
+                )
+            self.assertEqual(error.exception.code(), grpc.StatusCode.RESOURCE_EXHAUSTED)
+        rejected = self.request_job("limit:over")
+        self.assertEqual(rejected.error, "input_too_large")
+        self.assertFalse(list(Path(rejected.input_path).parent.glob("*.part")))
+
+    def test_storage_pressure_can_retry_same_request_and_replay_accepted_job(self):
+        accepted = self.client_submit(request_id="pressure:accepted")
+        with patch.dict(os.environ, {"MAX_JOB_STORAGE_BYTES": "1"}):
+            with self.assertRaises(grpc.RpcError) as error:
+                self.client_submit(request_id="pressure:retry")
+            self.assertEqual(error.exception.code(), grpc.StatusCode.RESOURCE_EXHAUSTED)
+            self.assertEqual(
+                self.client_submit(request_id="pressure:accepted").job_id,
+                accepted.job_id,
+            )
+        interrupted = self.request_job("pressure:retry")
+        self.assertIn(interrupted.status, ("accepted", "downloading"))
+        self.assertFalse(list(Path(interrupted.input_path).parent.glob("*.part")))
+        recovered = self.client_submit(request_id="pressure:retry")
+        self.assertEqual(recovered.job_id, interrupted.job_id)
+        self.assertEqual(self.store.get_job(recovered.job_id).status, "queued")
+
+    def test_disk_full_errors_are_resource_exhausted_and_do_not_publish_partial(self):
+        for number in (errno.ENOSPC, errno.EDQUOT):
+            request_id = "disk:" + str(number)
+            with (
+                self.subTest(errno=number),
+                patch(
+                    "whisper.admission.UploadAdmission.write",
+                    side_effect=OSError(number, "synthetic"),
+                ),
+            ):
+                with self.assertRaises(grpc.RpcError) as error:
+                    self.client_submit(request_id=request_id)
+                self.assertEqual(
+                    error.exception.code(), grpc.StatusCode.RESOURCE_EXHAUSTED
+                )
+            job = self.request_job(request_id)
+            self.assertIn(job.status, ("accepted", "downloading"))
+            self.assertFalse(Path(job.input_path).exists())
+            self.assertFalse(list(Path(job.input_path).parent.glob("*.part")))
+            self.assertEqual(
+                self.client_submit(request_id=request_id).job_id, job.job_id
+            )
+
+    def test_disk_pressure_after_first_chunk_removes_partial_and_allows_retry(self):
+        import shutil
+
+        free = shutil.disk_usage(self.store.storage_root)
+        with patch(
+            "whisper.admission.shutil.disk_usage",
+            side_effect=[free, free, free._replace(free=0)],
+        ):
+            with self.assertRaises(grpc.RpcError) as error:
+                self.client_stub.Submit(
+                    iter(
+                        [
+                            self.client_chunk(
+                                request_id="disk:midstream", audio=b"first"
+                            ),
+                            pb.TranscribeChunk(data=b"second"),
+                        ]
+                    ),
+                    timeout=5,
+                )
+            self.assertEqual(error.exception.code(), grpc.StatusCode.RESOURCE_EXHAUSTED)
+        job = self.request_job("disk:midstream")
+        self.assertFalse(Path(job.input_path).exists())
+        self.assertFalse(list(Path(job.input_path).parent.glob("*.part")))
+        self.assertEqual(
+            self.client_submit(request_id="disk:midstream").job_id, job.job_id
+        )
+
+    def test_metrics_endpoint_reports_job_volume_pressure(self):
+        import urllib.request
+
+        from whisper.metrics import MetricsEndpoint
+
+        self.client_submit()
+        endpoint = MetricsEndpoint(self.store, "127.0.0.1:0")
+        try:
+            address = (
+                "http://127.0.0.1:" + str(endpoint.server.server_port) + "/metrics"
+            )
+            with urllib.request.urlopen(address, timeout=5) as response:
+                payload = response.read().decode()
+            values = dict(
+                line.split()
+                for line in payload.splitlines()
+                if line.startswith("transcriber_storage_")
+            )
+            self.assertGreater(float(values["transcriber_storage_used_bytes"]), 0)
+            self.assertGreater(float(values["transcriber_storage_free_bytes"]), 0)
+            self.assertEqual(
+                float(values["transcriber_storage_limit_bytes"]), 8 * 1024**3
+            )
+            self.assertEqual(
+                float(values["transcriber_storage_reserve_bytes"]), 1024**3
+            )
+        finally:
+            endpoint.close()
+
+    def test_retained_result_age_metrics_stop_after_ack(self):
+        from whisper.metrics import render_metrics
+
+        job_id = self.client_submit().job_id
+        claimed = self.claim()
+        self.assertTrue(
+            self.rpc(
+                self.stub.Complete,
+                pb.WorkerCompleteRequest(
+                    job_id=job_id, lease_token=claimed.lease_token, text="synthetic"
+                ),
+            ).accepted
+        )
+        with self.store.connect() as conn:
+            conn.execute(
+                "UPDATE transcription_jobs SET finished_at = NOW() - INTERVAL '2 hours' WHERE job_id = %s",
+                (job_id,),
+            )
+        snapshot = self.store.metrics_snapshot()
+        done = next(row for row in snapshot["jobs"] if row["status"] == "done")
+        self.assertGreaterEqual(done["oldest_unacknowledged_seconds"], 7200)
+        payload = render_metrics(snapshot, {}).decode()
+        self.assertIn("transcriber_results_unacknowledged 1.0", payload)
+        self.assertIn("transcriber_results_oldest_unacknowledged_seconds", payload)
+        self.client_stub.Ack(pb.AckRequest(job_id=job_id), timeout=5)
+        done = next(
+            row
+            for row in self.store.metrics_snapshot()["jobs"]
+            if row["status"] == "done"
+        )
+        self.assertEqual(done["oldest_unacknowledged_seconds"], 0)
 
     def test_migration_adopts_previous_schema_without_losing_jobs(self):
         job_id = self.submit()

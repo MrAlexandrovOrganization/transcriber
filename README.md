@@ -120,6 +120,56 @@ new backend. Rollback to an old backend requires disabling retained submissions
 and durably receiving/Acking outstanding results first; keep the additive schema
 and ledger rather than reversing migrations.
 
+## Upload and disk admission
+
+Ingress and remote workers default to a **256 MiB** audio limit. Set the same
+positive `MAX_AUDIO_BYTES` on the coordinator and every eligible worker before
+increasing it. Container workers use that same selector; native workers retain
+`REMOTE_WORKER_MAX_INPUT_BYTES` as a compatibility override, but reject a value
+below their configured `MAX_AUDIO_BYTES`. There is no automatic cross-host limit
+negotiation. Deploy worker capacity first when increasing the limit. Existing
+queued files are not revalidated or removed when reducing it.
+
+Telegram Bot API's ability to download 2 GB does not mean transcription accepts
+2 GB. With these defaults, larger uploads are rejected during streaming with
+`RESOURCE_EXHAUSTED`; the Telegram client's specific oversize UI is a separate
+change. The audio limit is cumulative across chunks, including the first one;
+`0`, negative and malformed limit values fail configuration validation.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `MAX_AUDIO_BYTES` | 268435456 (256 MiB) | Maximum complete uploaded audio/video |
+| `MAX_JOB_STORAGE_BYTES` | 8589934592 (8 GiB) | Total job-file budget |
+| `MIN_JOB_STORAGE_FREE_BYTES` | 1073741824 (1 GiB) | Free filesystem space reserved from uploads |
+| `MAX_CONCURRENT_UPLOADS` | 4 | Upload streams writing on the same job volume |
+
+Admission counts all job files, including orphan partial uploads and retained
+terminal inputs, using the greater of logical and allocated size. It checks the
+budget, filesystem free space and upload slots before writing; it rechecks disk
+capacity for each chunk. Writers serialize checks, unbuffered chunk writes and
+final renames using `flock` on the job volume. Separate ingress processes sharing
+that local volume must use identical limits. Locks are not held while waiting
+for network data; process death releases the locks and stale slot tokens are
+reclaimed on the next admission. Network filesystems are unsupported for this
+guarantee. Directory scans cost work proportional to the number of job files
+per chunk; this favors simple, conservative accounting over a cached counter
+that could miss abandoned files after a crash.
+
+Capacity pressure and actual `ENOSPC`/`EDQUOT` errors return
+`RESOURCE_EXHAUSTED`, remove the current partial file and leave idempotent
+requests retryable with the same ID. Completed-request replay bypasses admission
+and still returns the original job, even when storage is full. Oversized inputs
+remain terminal `input_too_large`, preserving existing Ack semantics. Admission
+never evicts accepted audio or unacknowledged retained results. External writers
+can consume space after a check, so the reserve is a guard, not a filesystem quota
+or a reserved allocation. PostgreSQL and RabbitMQ need their own disk monitoring.
+
+Metrics include `transcriber_storage_{used,free,limit,reserve}_bytes` and
+`transcriber_results_oldest_unacknowledged_seconds`, alongside the existing
+unacknowledged-result count. Inspect disk pressure and client Ack progress before
+raising limits; increasing a budget does not create disk capacity. No automatic
+expiry for unacknowledged retained results is introduced.
+
 ## Main environment variables
 
 - `DATABASE_URL`

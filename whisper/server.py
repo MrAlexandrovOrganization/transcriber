@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import logging
 import os
 import re
@@ -18,6 +19,7 @@ from opentelemetry import trace
 from opentelemetry.trace import SpanKind, Status, StatusCode
 
 from proto import whisper_pb2, whisper_pb2_grpc
+from whisper.admission import CapacityExceeded, UploadAdmission, UploadLimits
 from whisper.inference import FasterWhisperEngine, InferenceStopped
 from whisper.metrics import MetricsEndpoint
 from whisper.scheduling import worker_concurrency
@@ -51,6 +53,7 @@ _STATUS_MAP = {
 class TranscriptionServicer(whisper_pb2_grpc.TranscriptionServiceServicer):
     def __init__(self, store: JobStore):
         self._store = store
+        UploadLimits.from_env()  # Fail invalid configuration at startup.
 
     def Transcribe(
         self,
@@ -90,9 +93,7 @@ class TranscriptionServicer(whisper_pb2_grpc.TranscriptionServiceServicer):
         fmt = first_chunk.format
         if not re.fullmatch(r"[a-zA-Z0-9]{1,12}", fmt):
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, "Invalid audio format")
-        # Existing clients had no total-upload limit. Keep it opt in for the
-        # ingress; the isolated pilot sets its own small synthetic input limit.
-        max_audio_bytes = int(os.getenv("MAX_AUDIO_BYTES", "0"))
+        limits = UploadLimits.from_env()
         opts = first_chunk.options if first_chunk.HasField("options") else None
         preset = (opts.preset or "auto") if opts else "auto"
         language_override = opts.language if opts else ""
@@ -118,7 +119,7 @@ class TranscriptionServicer(whisper_pb2_grpc.TranscriptionServiceServicer):
                     first_chunk,
                     request_iterator,
                     context,
-                    max_audio_bytes,
+                    limits,
                 )
         except UploadBusy:
             context.abort(
@@ -137,7 +138,7 @@ class TranscriptionServicer(whisper_pb2_grpc.TranscriptionServiceServicer):
         first_chunk,
         request_iterator,
         context,
-        max_audio_bytes,
+        limits,
     ):
         job = upload.job
         if not upload.needs_upload:
@@ -155,46 +156,66 @@ class TranscriptionServicer(whisper_pb2_grpc.TranscriptionServiceServicer):
             previous.unlink(missing_ok=True)
         temporary = upload.input_path.with_name(f"upload-{uuid.uuid4().hex}.part")
         too_large = False
+        admission = UploadAdmission(self._store.storage_root, limits)
         try:
-            with temporary.open("xb") as audio:
+            with admission.upload(), temporary.open("xb", buffering=0) as audio:
                 total = 0
                 for chunk in _prepend(first_chunk, request_iterator):
                     total += len(chunk.data)
-                    if max_audio_bytes > 0 and total > max_audio_bytes:
+                    if total > limits.audio_bytes:
                         too_large = True
                         raise ValueError("input_too_large")
-                    audio.write(chunk.data)
+                    admission.write(audio, chunk.data)
                 # gRPC may end the iterator without raising on cancellation.
                 # Never publish a truncated stream as a complete input file.
                 if not context.is_active():
                     raise InterruptedError("Upload interrupted")
                 audio.flush()
                 os.fsync(audio.fileno())
-            os.replace(temporary, upload.input_path)
-            directory_fd = os.open(upload.input_path.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
-        except Exception:
+            # Rename must share the admission lock: a concurrent directory scan
+            # must never miss a file between its temporary and final names.
+            with admission.locked():
+                os.replace(temporary, upload.input_path)
+                directory_fd = os.open(upload.input_path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+        except Exception as error:
+            exhausted = isinstance(error, CapacityExceeded) or (
+                isinstance(error, OSError)
+                and error.errno in {errno.ENOSPC, errno.EDQUOT}
+            )
             temporary.unlink(missing_ok=True)
+            if too_large:
+                error_code = "input_too_large"
+                details = "Audio upload exceeds the configured limit"
+            elif exhausted:
+                error_code = "storage_capacity"
+                details = "Upload capacity exhausted; retry the same request ID"
+            else:
+                error_code = "upload_failed"
+                details = "Upload interrupted; retry the same request ID"
             if job.request_id and not too_large:
                 self._store.mark_upload_interrupted(job.job_id)
             else:
                 self._store.fail_job(
                     job_id=job.job_id,
                     worker_id="",
-                    error="input_too_large" if too_large else "upload_failed",
+                    error=error_code,
                     retryable=False,
                 )
-            logger.error("Failed to persist upload for job %s", job.job_id)
+            # Only our fixed capacity reasons are safe to expose, not OSError
+            # text or underlying database/credential exceptions.
+            reason = str(error) if isinstance(error, CapacityExceeded) else error_code
+            logger.warning(
+                "Audio upload rejected: job=%s reason=%s", job.job_id, reason
+            )
             context.abort(
                 grpc.StatusCode.RESOURCE_EXHAUSTED
-                if too_large
+                if too_large or exhausted
                 else grpc.StatusCode.INTERNAL,
-                "Audio upload exceeds the configured limit"
-                if too_large
-                else "Upload interrupted; retry the same request ID",
+                details,
             )
         queue_position = self._store.mark_queued(job.job_id)
         if queue_position is None:

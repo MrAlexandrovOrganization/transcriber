@@ -27,7 +27,7 @@ from proto import whisper_pb2 as pb
 from proto import whisper_pb2_grpc as rpc
 from whisper.inference import FasterWhisperEngine, InferenceStopped
 from whisper.jsonlog import setup_logging
-from whisper.limits import MAX_RESULT_BYTES
+from whisper.limits import DEFAULT_MAX_AUDIO_BYTES, MAX_RESULT_BYTES, audio_limit
 from whisper.scheduling import worker_concurrency
 from whisper.telemetry import context_from_carrier, init_telemetry
 from whisper.worker_health import report as report_health
@@ -44,7 +44,7 @@ class Config:
     poll_interval: float = 2.0
     rpc_timeout: float = 15.0
     download_timeout: float = 120.0
-    max_input_bytes: int = 256 * 1024 * 1024
+    max_input_bytes: int = DEFAULT_MAX_AUDIO_BYTES
     tls: bool = False
     tls_ca_file: str = ""
     shutdown_grace: float = 10.0
@@ -97,6 +97,11 @@ class Config:
 
     @classmethod
     def from_env(cls):
+        max_input_bytes = int(
+            os.getenv("REMOTE_WORKER_MAX_INPUT_BYTES", str(audio_limit()))
+        )
+        if max_input_bytes < audio_limit():
+            raise ValueError("REMOTE_WORKER_MAX_INPUT_BYTES must be >= MAX_AUDIO_BYTES")
         return cls(
             endpoint=os.getenv("REMOTE_WORKER_ENDPOINT", "localhost:50056"),
             token_file=os.getenv("REMOTE_WORKER_TOKEN_FILE", ""),
@@ -109,9 +114,7 @@ class Config:
             download_timeout=float(
                 os.getenv("REMOTE_WORKER_DOWNLOAD_TIMEOUT_S", "120")
             ),
-            max_input_bytes=int(
-                os.getenv("REMOTE_WORKER_MAX_INPUT_BYTES", str(256 * 1024 * 1024))
-            ),
+            max_input_bytes=max_input_bytes,
             tls=os.getenv("REMOTE_WORKER_TLS", "1") == "1",
             tls_ca_file=os.getenv("REMOTE_WORKER_TLS_CA_FILE", ""),
             shutdown_grace=float(os.getenv("REMOTE_WORKER_SHUTDOWN_GRACE_S", "10")),

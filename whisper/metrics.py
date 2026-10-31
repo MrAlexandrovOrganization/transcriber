@@ -7,10 +7,12 @@ import logging
 import math
 import os
 import re
+import shutil
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+from whisper.admission import UploadLimits, storage_bytes
 from whisper.storage import JobStore
 
 LOG = logging.getLogger(__name__)
@@ -92,6 +94,25 @@ def render_metrics(snapshot: dict, workers: dict[str, str], policies=None) -> by
     ):
         definition(name, "gauge", help_text)
         sample(name, value)
+
+    definition(
+        "results_oldest_unacknowledged_seconds",
+        "gauge",
+        "Age since completion of the oldest retained unacknowledged terminal result.",
+    )
+    sample(
+        "results_oldest_unacknowledged_seconds",
+        max(
+            (
+                jobs.get(s, {}).get("oldest_unacknowledged_seconds", 0)
+                for s in ("done", "failed")
+            ),
+            default=0,
+        ),
+    )
+    for key, value in snapshot.get("storage", {}).items():
+        definition("storage_" + key, "gauge", "Job volume capacity in bytes.")
+        sample("storage_" + key, value)
 
     availability = {row["worker_id"]: row for row in snapshot["workers"]}
     outbox = (snapshot.get("outbox") or [{}])[0]
@@ -246,8 +267,16 @@ class MetricsEndpoint:
                     return
                 try:
                     if time.monotonic() - endpoint._cached_at >= 5:
+                        snapshot = store.metrics_snapshot()
+                        limits = UploadLimits.from_env()
+                        snapshot["storage"] = {
+                            "used_bytes": storage_bytes(store.storage_root),
+                            "free_bytes": shutil.disk_usage(store.storage_root).free,
+                            "limit_bytes": limits.storage_bytes,
+                            "reserve_bytes": limits.min_free_bytes,
+                        }
                         endpoint._payload = render_metrics(
-                            store.metrics_snapshot(),
+                            snapshot,
                             endpoint.workers,
                             store.worker_policies,
                         )

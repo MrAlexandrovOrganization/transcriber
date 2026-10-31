@@ -22,6 +22,7 @@ x-lifecycle: &lifecycle
     options: {max-size: 5m, max-file: "4"}
 
 x-environment: &environment
+  MAX_AUDIO_BYTES: ${MAX_AUDIO_BYTES:-268435456}
   HOME: /tmp
   HF_HOME: /models
   HF_HUB_OFFLINE: "1"

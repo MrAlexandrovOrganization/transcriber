@@ -42,7 +42,14 @@ class ContainerHealthTests(unittest.TestCase):
 
 @unittest.skipUnless(shutil.which("docker"), "Docker CLI required for Compose checks")
 class ComposeTests(unittest.TestCase):
-    def compose(self, profiles, autodeploy=False, wsl_direct=False, tailnet=False):
+    def compose(
+        self,
+        profiles,
+        autodeploy=False,
+        wsl_direct=False,
+        tailnet=False,
+        audio_bytes=None,
+    ):
         with tempfile.TemporaryDirectory() as temp:
             env_file = Path(temp) / "synthetic.env"
             env_file.write_text(
@@ -68,6 +75,8 @@ class ComposeTests(unittest.TestCase):
                 CUBLAS_VERSION="synthetic",
                 TAILSCALE_VERSION="synthetic",
             )
+            if audio_bytes is not None:
+                env["MAX_AUDIO_BYTES"] = str(audio_bytes)
             if autodeploy:
                 env.update(
                     WORKER_CPU_IMAGE="synthetic/cpu@sha256:" + "a" * 64,
@@ -205,6 +214,16 @@ class ComposeTests(unittest.TestCase):
                 # Serialized config retains escapes for expansion in the image.
                 self.assertIn("$$LD_LIBRARY_PATH", gpu["entrypoint"][2])
                 self.assertIn('exec "$$@"', gpu["entrypoint"][2])
+
+    def test_worker_audio_limit_uses_shared_selector(self):
+        from whisper.limits import DEFAULT_MAX_AUDIO_BYTES
+
+        for value in (DEFAULT_MAX_AUDIO_BYTES, 536870912):
+            services = self.compose("cpu,gpu", audio_bytes=value)["services"]
+            for name in ("worker-cpu", "worker-gpu"):
+                self.assertEqual(
+                    int(services[name]["environment"]["MAX_AUDIO_BYTES"]), value
+                )
 
     def test_tailnet_preserves_worker_security_and_resource_configuration(self):
         normal = self.compose("cpu,gpu", autodeploy=True, wsl_direct=True)["services"]

@@ -48,6 +48,7 @@ services:
   whisper-worker:
     command: [python, -m, whisper.remote_worker]
     environment:
+      MAX_AUDIO_BYTES: ${MAX_AUDIO_BYTES:-268435456}
       REMOTE_WORKER_ENDPOINT: ${SERVER_WORKER_ENDPOINT:-workers.example.com:443}
       REMOTE_WORKER_TLS: "1"
       REMOTE_WORKER_TOKEN_FILE: /run/credentials/token
