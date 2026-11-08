@@ -151,6 +151,22 @@ class JobStore:
                 for name in ("jobs", "workers", "running", "observations", "outbox")
             }
 
+    def has_available_workers(self) -> bool:
+        # Busy slots remain eligible: this checks outage, not spare capacity.
+        # Use a shorter observation window without changing job/worker leases.
+        with self.connect() as conn:
+            conn.execute("SET TRANSACTION READ ONLY")
+            conn.execute("SET LOCAL statement_timeout = '3s'")
+            row = conn.execute(
+                _sql("available_workers"),
+                (
+                    self.queue_backend == "rabbitmq",
+                    Json(self.worker_policies),
+                    Json(self.worker_policies),
+                ),
+            ).fetchone()
+        return bool(row["available"])
+
     def init_schema(self) -> None:
         # Keep the established startup migration policy, now with a ledger and
         # one transaction/advisory lock shared by ingress and local workers.

@@ -55,6 +55,11 @@ class TranscriptionServicer(whisper_pb2_grpc.TranscriptionServiceServicer):
         self._store = store
         UploadLimits.from_env()  # Fail invalid configuration at startup.
 
+    def GetAvailability(self, request, context):
+        return whisper_pb2.AvailabilityResponse(
+            available=self._store.has_available_workers()
+        )
+
     def Transcribe(
         self,
         request_iterator: Iterator[whisper_pb2.TranscribeChunk],

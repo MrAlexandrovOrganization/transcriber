@@ -18,6 +18,17 @@ service TranscriptionService {
 
   // Confirm durable receipt of a terminal result or error.
   rpc Ack(AckRequest) returns (AckResponse);
+
+  // Advisory preflight for optional clients; busy workers still count as available.
+  rpc GetAvailability(AvailabilityRequest) returns (AvailabilityResponse);
+}
+
+message AvailabilityRequest {}
+
+message AvailabilityResponse {
+  // At least one enabled worker has reported within 45 seconds. This is not
+  // a reservation or a guarantee that a worker will remain online after upload.
+  bool available = 1;
 }
 
 // Optional, separately authenticated endpoint for workers outside Docker.

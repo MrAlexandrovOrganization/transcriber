@@ -145,6 +145,50 @@ class WorkerAPITests(unittest.TestCase):
         self.store.mark_queued(job.job_id)
         return job.job_id
 
+    def test_client_availability_tracks_enabled_fresh_workers_even_when_busy(self):
+        instance = str(uuid.uuid4())
+
+        def available():
+            return self.client_stub.GetAvailability(
+                pb.AvailabilityRequest(), timeout=5
+            ).available
+
+        self.assertFalse(available())
+        self.report_availability("wsl-cpu", instance)
+        self.assertTrue(available())
+        self.store.worker_policies = {"wsl-cpu": {"priority": 10, "max_concurrency": 1}}
+        self.submit()
+        self.assertTrue(self.claim_primary("wsl-cpu", instance).job_id)
+        self.assertTrue(available())
+        self.store.worker_policies["wsl-cpu"]["max_concurrency"] = 0
+        self.assertFalse(available())
+        self.store.worker_policies = {
+            "mac-primary": {"priority": 20, "max_concurrency": 1}
+        }
+        self.assertFalse(available())
+        self.store.worker_policies = {}
+        with self.store.connect() as conn:
+            conn.execute(
+                "UPDATE worker_availability SET reported_at = NOW() - INTERVAL '46 seconds'"
+            )
+        self.assertFalse(available())
+        self.report_availability("wsl-cpu", instance)
+        self.assertTrue(available())
+        self.report_availability("wsl-cpu", instance, False)
+        self.assertFalse(available())
+
+    def test_client_availability_requires_consumer_admission_in_rabbitmq_mode(self):
+        instance = str(uuid.uuid4())
+        self.store.queue_backend = "rabbitmq"
+        self.store.worker_policies = {"wsl-cpu": {"priority": 10, "max_concurrency": 1}}
+        self.report_availability("wsl-cpu", instance)
+        self.assertFalse(self.store.has_available_workers())
+        self.assertIsNotNone(self.store.register_consumer("wsl-cpu", instance))
+        self.assertTrue(self.store.has_available_workers())
+        with self.store.connect() as conn:
+            conn.execute("UPDATE worker_availability SET consumer_until = NOW()")
+        self.assertFalse(self.store.has_available_workers())
+
     def claim(self):
         return self.rpc(
             self.stub.Claim, pb.WorkerClaimRequest(worker_id="pilot-worker")
