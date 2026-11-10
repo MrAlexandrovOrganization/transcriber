@@ -13,4 +13,4 @@ services:
     ports:
       - "100.64.0.5:50053:50053"
     environment:
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://100.64.0.1:4317
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://100.64.0.3:4317

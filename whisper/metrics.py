@@ -8,11 +8,13 @@ import math
 import os
 import re
 import shutil
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from whisper.admission import UploadLimits, storage_bytes
+from whisper.jsonlog import failure_fields
 from whisper.storage import JobStore
 
 LOG = logging.getLogger(__name__)
@@ -290,14 +292,25 @@ class MetricsEndpoint:
                     self.wfile.write(endpoint._payload)
                 except (BrokenPipeError, ConnectionResetError):
                     pass
-                except Exception:
-                    LOG.warning("Metrics snapshot unavailable")
-                    self.send_error(503, "Metrics unavailable")
+                except Exception as exc:
+                    LOG.warning(
+                        "Metrics snapshot unavailable", extra=failure_fields(exc)
+                    )
+                    try:
+                        self.send_error(503, "Metrics unavailable")
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
 
             def log_message(self, *_):
                 pass
 
         class Server(HTTPServer):
+            def handle_error(self, request, client_address):
+                # Keep unexpected handler failures in the structured logger.
+                LOG.error(
+                    "Metrics HTTP handler failed", extra=failure_fields(sys.exception())
+                )
+
             def get_request(self):
                 client, peer = super().get_request()
                 client.settimeout(5)

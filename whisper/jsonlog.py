@@ -7,6 +7,7 @@ import json
 import logging
 import os
 
+import grpc
 from opentelemetry import trace
 
 SERVICE_NAME = "whisper"
@@ -29,6 +30,11 @@ class JSONFormatter(logging.Formatter):
             "service": SERVICE_NAME,
             "role": _ROLE,
         }
+        # Only application-owned diagnostic fields are copied. Exception text
+        # can contain credentials, signed URLs or input, so failure_fields omits it.
+        for name in ("error_type", "rpc_code", "retry_attempt", "retry_in_seconds"):
+            if hasattr(record, name):
+                payload[name] = getattr(record, name)
         if record.exc_info:
             payload["exc_info"] = self.formatException(record.exc_info)
         span_context = trace.get_current_span().get_span_context()
@@ -37,6 +43,18 @@ class JSONFormatter(logging.Formatter):
             payload["span_id"] = format(span_context.span_id, "016x")
             payload["trace_flags"] = format(int(span_context.trace_flags), "02x")
         return json.dumps(payload, ensure_ascii=False)
+
+
+def failure_fields(error: Exception, **retry) -> dict[str, object]:
+    fields: dict[str, object] = {"error_type": type(error).__name__}
+    if isinstance(error, grpc.RpcError):
+        code = error.code() if callable(getattr(error, "code", None)) else None
+        if isinstance(code, grpc.StatusCode):
+            fields["rpc_code"] = code.name
+    for name in ("retry_attempt", "retry_in_seconds"):
+        if name in retry:
+            fields[name] = retry[name]
+    return fields
 
 
 def _resolve_level() -> int:

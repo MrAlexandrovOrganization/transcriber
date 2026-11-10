@@ -333,3 +333,16 @@ The old server runs only `make forwarder-up`: its Docker alias `whisper-ingress`
 forwards existing notes-bot/stash clients to Russia. The same proxy exposes
 Jaeger OTLP on the old server's tailnet address for the moved services.
 See [migration and rollback](docs/hostkey-russia-migration.md).
+
+## Worker failure diagnostics and recovery
+
+Worker retry logs include `error_type`, gRPC `rpc_code` when available,
+`retry_attempt` and `retry_in_seconds`. These diagnostics omit exception messages,
+request contents and credentials. Unexpected iteration failures remain ERROR and
+now use exponential backoff with jitter capped at 60 seconds, interrupted by
+shutdown. Successful iterations reset the failure counter. Existing durable
+queue/lease recovery is preserved; this does not start a model fallback on Russia.
+An unavailable metrics snapshot still returns 503; a disconnected scrape response
+is handled without a raw stderr traceback. Unexpected HTTP handler failures use
+the JSON logger. The Russia tracing overlay points to Jaeger on WSL `.3:4317`;
+end-to-end span delivery must be verified after deployment.

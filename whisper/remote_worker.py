@@ -26,7 +26,7 @@ from opentelemetry.trace import SpanKind
 from proto import whisper_pb2 as pb
 from proto import whisper_pb2_grpc as rpc
 from whisper.inference import FasterWhisperEngine, InferenceStopped
-from whisper.jsonlog import setup_logging
+from whisper.jsonlog import failure_fields, setup_logging
 from whisper.limits import DEFAULT_MAX_AUDIO_BYTES, MAX_RESULT_BYTES, audio_limit
 from whisper.scheduling import worker_concurrency
 from whisper.telemetry import context_from_carrier, init_telemetry
@@ -251,6 +251,7 @@ class RemoteWorker:
                         from whisper.broker import consume_slot
 
                         asyncio.run(consume_slot(self, broker))
+                        failures = 0
                         self.stop.wait(1)
                     else:
                         claim = self._call(
@@ -265,16 +266,30 @@ class RemoteWorker:
                             self.process(claim)
                         else:
                             self.stop.wait(self.config.poll_interval)
-                except grpc.RpcError:
+                except grpc.RpcError as exc:
                     failures += 1
-                    delay = min(60.0, 2.0 ** min(failures, 6)) * random.uniform(
-                        0.8, 1.2
+                    delay = min(
+                        60.0, 2.0 ** min(failures, 6) * random.uniform(0.8, 1.2)
                     )
-                    logger.warning("Worker coordinator unavailable; retry scheduled")
+                    logger.warning(
+                        "Worker coordinator unavailable; retry scheduled",
+                        extra=failure_fields(
+                            exc, retry_attempt=failures, retry_in_seconds=delay
+                        ),
+                    )
                     self.stop.wait(delay)
-                except Exception:
-                    logger.error("Worker iteration failed; retry scheduled")
-                    self.stop.wait(self.config.poll_interval)
+                except Exception as exc:
+                    failures += 1
+                    delay = min(
+                        60.0, 2.0 ** min(failures, 6) * random.uniform(0.8, 1.2)
+                    )
+                    logger.error(
+                        "Worker iteration failed; retry scheduled",
+                        extra=failure_fields(
+                            exc, retry_attempt=failures, retry_in_seconds=delay
+                        ),
+                    )
+                    self.stop.wait(delay)
         finally:
             self.stop.set()
             self._health(False)
@@ -338,11 +353,12 @@ class RemoteWorker:
                     self._report_availability(False)
                     continue
                 self._available.set()
-            except Exception:
+            except Exception as exc:
                 self._available.clear()
                 self._health(False)
                 logger.warning(
-                    "Worker availability report unavailable; retry scheduled"
+                    "Worker availability report unavailable; retry scheduled",
+                    extra=failure_fields(exc, retry_in_seconds=interval),
                 )
 
     def process(self, claim):
