@@ -365,3 +365,10 @@ CI публикует его как artifact. Экспорт содержит я
 пакетов задаются закрытой конфигурацией доставки. Сборщик строит итоговый файл
 из закреплённых экспортов; обычная сборка этого проекта не зависит от них.
 Копия Python-инструмента закреплена SHA-256 в `monitoring/tool.lock.json`.
+
+### Observability-only delivery
+
+Commits marked `[resources-only]` still run checks and build validation, and
+export the service-owned monitoring package. They do not activate the application
+or promote worker images. The collector deploys the pinned monitoring resources
+separately, preserving the current application digest and running jobs.
