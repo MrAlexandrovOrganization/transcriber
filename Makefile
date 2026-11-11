@@ -120,10 +120,14 @@ proto: proto-lint
 
 .PHONY: up
 up:
+ifeq ($(strip $(TRANSCRIBER_ROLE)),router)
+	$(MAKE) router-up
+else
 ifeq ($(strip $(TRANSCRIBER_ROLE)):$(strip $(WORKER_AUTODEPLOY)),workers:1)
 	$(MAKE) worker-release
 endif
 	$(MAKE) up-selected
+endif
 
 up-selected: config-check
 ifeq ($(strip $(TRANSCRIBER_ROLE)):$(strip $(WORKER_AUTODEPLOY)),workers:1)
@@ -183,6 +187,11 @@ test-router-docker:
 .PHONY: ci-deploy-coordinator
 ci-deploy-coordinator:
 	python3 scripts/coordinator_deploy.py
+
+.PHONY: coordinator-tailnet-up
+coordinator-tailnet-up: config-check
+	@test '$(TRANSCRIBER_ROLE):$(COORDINATOR_TAILNET)' = server:1
+	$(DOCKER_COMPOSE) up -d --no-deps --wait --wait-timeout 90 coordinator-tailnet
 
 .PHONY: restart
 restart:

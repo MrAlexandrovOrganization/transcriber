@@ -54,8 +54,10 @@ stateful image references; pin them to the source digests for migration. Default
 still resolve from `makefiles/versions.mk`.
 
 Provision the coordinator with a single-use Headscale key for the existing owner.
-Keep its state volume and the protected registration file. Start only the sidecar
-before restoring data. No worker is registered or enabled by this step.
+Keep its state volume and the protected registration file. Use
+`make coordinator-tailnet-up` to start only the sidecar before restoring data.
+No worker is registered or enabled by this step. Router `make up` uses the scoped
+router activation and preserves stopped source containers for rollback.
 If the sidecar is recreated later, recreate ingress and RabbitMQ with it so that
 their shared network namespace is current. A container-only restart retains the
 namespace. Ordinary `make image-deploy` uses Compose dependency restart semantics.
