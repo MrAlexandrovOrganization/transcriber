@@ -11,7 +11,7 @@ stage.match {
 	// Tailscale has no native severity. Only these routine events have a policy;
 	// an unfamiliar event stays unknown so a new failure cannot become info.
 	stage.regex {
-		expression = `^[0-9]{4}/[0-9]{2}/[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} (?P<tailnet_routine>(netcheck: ((netcheck: )?UDP is blocked, trying (ICMP|HTTPS)|DetectCaptivePortal\(found=false\))|magicsock: (new contact: .+|derp-[0-9]+ connected; connGen=[0-9]+)|derphttp\.Client\.(Recv|Send): connecting to derp-[0-9]+ \([^)]*\)|control: (controlhttp: forcing port 443 dial due to recent noise dial|trying bootstrapDNS\(.+ \.\.\.|NetInfo: .+|controlclient direct: (updating discoKey for .+ via mapSession|got TSMP disco key advertisement from .+ via eventbus))))$`
+		expression = `^[0-9]{4}/[0-9]{2}/[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} (?P<tailnet_routine>(\[RATELIMIT\] format\("control: \[v\\x00JSON\]%d%s"\)( \([0-9]+ dropped\))?|netcheck: ((netcheck: )?UDP is blocked, trying (ICMP|HTTPS)|DetectCaptivePortal\(found=false\))|magicsock: (new contact: .+|derp-[0-9]+ connected; connGen=[0-9]+)|derphttp\.Client\.(Recv|Send): connecting to derp-[0-9]+ \([^)]*\)|control: (controlhttp: forcing port 443 dial due to recent noise dial|trying bootstrapDNS\(.+ \.\.\.|NetInfo: .+|controlclient direct: (updating discoKey for .+ via mapSession|got TSMP disco key advertisement from .+ via eventbus))))$`
 	}
 
 	stage.regex {
@@ -20,6 +20,6 @@ stage.match {
 
 	stage.template {
 		source   = "text_level"
-		template = `{{ if .tailnet_retry_warning }}warn{{ else if .tailnet_routine }}debug{{ else }}{{ .Value }}{{ end }}`
+		template = `{{ if .tailnet_routine }}debug{{ else if .tailnet_retry_warning }}warn{{ else }}{{ .Value }}{{ end }}`
 	}
 }
