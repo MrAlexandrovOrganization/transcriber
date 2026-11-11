@@ -19,8 +19,13 @@ health separately. It cannot keep transcribing while the coordinator is offline.
 
 WSL has a separate `transcriber-coordinator` checkout, Compose project, persistent
 tailnet identity and volumes. The existing CPU/GPU worker checkout and worker IDs
-remain independent. The sidecar joins the local whisper/Prometheus/Jaeger Docker
-networks; ingress and RabbitMQ share its network namespace. No new public or
+remain independent. The example preserves the backend Compose project name `transcriber`;
+the existing worker checkout uses its separate `transcriber-workers` project.
+RabbitMQ clears the container hostname when joining the shared network namespace
+and explicitly keeps `RABBITMQ_NODENAME=rabbit@transcriber-rabbitmq`, so its restored
+node and data-directory identity cannot change with the sidecar's hostname.
+The sidecar joins the local whisper/Prometheus/Jaeger Docker networks; ingress
+and RabbitMQ share its network namespace. No new public or
 Windows host ports are published. Inside this namespace, raw-table rules accept
 the private API/AMQPS from Russia's configured IPv4 address only and block these
 ports over tailnet IPv6; Docker-local traffic and administrative SSH are unaffected.
@@ -124,8 +129,10 @@ credentials, worker identities, lease fencing and published image for rollback.
 
 ## Checks
 
-`make check` validates both role examples, proxy syntax and admission code.
-`make test-router-docker` uses only named disposable fixtures and synthetic TCP
+`make check` validates both role examples, proxy syntax, Docker runtime namespace/
+mount constraints, the restored RabbitMQ node identity and admission code.
+`make test-router-docker` creates the actual Compose router service with private
+fixture network/ports and only named disposable fixtures and synthetic TCP
 streams to check forwarding, existing-channel failure bounds, router liveness and
 recovery. PostgreSQL integration tests check rejection without orphan jobs and
 idempotent replay/status/cancel/Ack while no worker is online. The normal broker

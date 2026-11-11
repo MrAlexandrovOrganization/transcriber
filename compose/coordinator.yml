@@ -61,6 +61,10 @@ services:
           cpus: "1.0"
           memory: 512m
   rabbitmq:
+    hostname: !reset null
+    environment:
+      # Preserve the node/cold data identity while sharing the sidecar hostname.
+      RABBITMQ_NODENAME: rabbit@transcriber-rabbitmq
     networks: !reset []
     ports: !reset []
     network_mode: service:coordinator-tailnet

@@ -319,6 +319,8 @@ config-check:
 	$(DOCKER_COMPOSE) config --quiet
 ifeq ($(strip $(TRANSCRIBER_ROLE)),workers)
 	$(DOCKER_COMPOSE) config --format json | python3 scripts/validate_workers.py
+else
+	$(DOCKER_COMPOSE) config --format json | python3 scripts/validate_server.py
 endif
 
 config-check-examples:

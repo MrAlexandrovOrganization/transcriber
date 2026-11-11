@@ -1,10 +1,10 @@
 """Opaque streaming, fast outage and recovery using disposable Docker fixtures."""
 
-import io
+import json
 import os
 import socket
 import subprocess
-import tarfile
+import tempfile
 import time
 import urllib.request
 import uuid
@@ -19,6 +19,7 @@ def main():
     prefix = "transcriber-router-test-" + uuid.uuid4().hex[:10]
     network, backend, router = prefix + "-net", prefix + "-backend", prefix + "-router"
     created = []
+    temporary = tempfile.TemporaryDirectory(prefix="transcriber-router-compose-")
     try:
         # A private fixture bridge also supports published loopback ports on
         # Docker Desktop, which does not publish ports on internal networks.
@@ -56,40 +57,65 @@ while True: time.sleep(1)
             code,
         )
         created.append(backend)
-        args = [
-            "create",
-            "--name",
-            router,
-            "--network",
-            network,
-            "--memory",
-            "64m",
-            "--cpus",
-            "0.5",
-            "-e",
-            "COORDINATOR_ADDRESS=coordinator",
-        ]
         ports = {}
         for port in (50053, 50056, 5671, 8404):
             with socket.socket() as reservation:
                 reservation.bind(("127.0.0.1", 0))
                 ports[port] = reservation.getsockname()[1]
-            args += ["-p", f"127.0.0.1:{ports[port]}:{port}"]
-        docker(*args, "haproxy:" + os.environ["HAPROXY_VERSION"])
-        created.append(router)
-        archive = io.BytesIO()
-        with tarfile.open(fileobj=archive, mode="w") as tar:
-            content = Path("deploy/router.cfg").read_bytes()
-            member = tarfile.TarInfo("haproxy.cfg")
-            member.mode = 0o644
-            member.size = len(content)
-            tar.addfile(member, io.BytesIO(content))
-        subprocess.run(
-            ["docker", "cp", "-", router + ":/usr/local/etc/haproxy/"],
-            input=archive.getvalue(),
-            check=True,
-            timeout=30,
+        root = Path(temporary.name)
+        config = root / "router.cfg"
+        config.write_bytes(Path("deploy/router.cfg").read_bytes())
+        config.chmod(0o644)
+        mounts = [
+            {
+                "type": "bind",
+                "source": str(config),
+                "target": "/usr/local/etc/haproxy/haproxy.cfg",
+                "read_only": True,
+                "bind": {"create_host_path": False, "propagation": "rprivate"},
+            }
+        ]
+        published = [f"127.0.0.1:{value}:{key}" for key, value in ports.items()]
+        override = root / "compose.yml"
+        override.write_text(
+            "services:\n  router:\n    container_name: "
+            + router
+            + "\n    ports: !override "
+            + json.dumps(published)
+            + "\n    volumes: !override "
+            + json.dumps(mounts)
+            + "\n    networks: !override [fixture]\nnetworks:\n  fixture:\n    external: true\n    name: "
+            + network
+            + "\n"
         )
+        env = dict(
+            os.environ,
+            ROUTER_BIND_ADDRESS="127.0.0.1",
+            COORDINATOR_ADDRESS="coordinator",
+        )
+        subprocess.run(
+            [
+                "docker",
+                "compose",
+                "--project-directory",
+                str(Path.cwd()),
+                "--env-file",
+                "/dev/null",
+                "-p",
+                prefix,
+                "-f",
+                "compose/router.yml",
+                "-f",
+                str(override),
+                "create",
+                "--no-build",
+                "router",
+            ],
+            env=env,
+            check=True,
+            timeout=90,
+        )
+        created.append(router)
         docker("start", router)
 
         def address(port):
@@ -155,6 +181,7 @@ while True: time.sleep(1)
             docker("rm", "-f", name)
         if created:
             docker("network", "rm", network)
+        temporary.cleanup()
 
 
 if __name__ == "__main__":

@@ -193,6 +193,7 @@ jobs:
   release:
     name: Approve worker release
     needs: [deploy, publish]
+    if: always() && needs.deploy.result == 'success' && needs.publish.result == 'success'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
