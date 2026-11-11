@@ -51,6 +51,8 @@ def main():
             f"  IdentityFile {root / 'key'}",
             f"  UserKnownHostsFile {root / 'known_hosts'}",
             "  ConnectTimeout 10",
+            # The scoped tailnet jump stalls on the larger hybrid KEX packets.
+            "  KexAlgorithms curve25519-sha256",
             "  ServerAliveInterval 15",
             "  ServerAliveCountMax 4",
             "  LogLevel ERROR",

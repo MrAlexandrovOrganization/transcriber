@@ -80,6 +80,9 @@ image manifest contract. Registry credentials travel in SSH stdin, not arguments
 or files retained on either host. The previous Russia deployment key stays in use
 for that router checkout. Receiver bootstrap/update is an explicit administrator
 operation; a normal application release cannot replace the installed receiver.
+This scoped SSH client uses the tested Curve25519 key exchange: the default
+larger hybrid exchange stalled on the jump path. Strict host-key verification
+and pinned host keys remain enabled on both connections.
 
 ## Consistent cutover
 
