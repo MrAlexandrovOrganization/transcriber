@@ -380,3 +380,5 @@ forwarder-down:
 	$(FORWARDER_COMPOSE) down
 forwarder-check:
 	$(FORWARDER_COMPOSE) config --quiet
+
+include makefiles/observability.mk

@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "service": "transcriber",
+  "components": [
+    "transcriber/*",
+    "transcriber-workers/*"
+  ],
+  "logs": [
+    {
+      "file": "monitoring/alloy/logs.alloy",
+      "phase": "parse",
+      "order": 90
+    }
+  ],
+  "assets": [
+    {
+      "kind": "metrics",
+      "file": "monitoring/prometheus/transcriber.yml",
+      "destination": "transcriber.yml",
+      "location": "local"
+    },
+    {
+      "kind": "dashboards",
+      "file": "monitoring/grafana/transcriber-overview.json",
+      "destination": "Transcription/transcriber-overview.json",
+      "location": "central"
+    },
+    {
+      "kind": "dashboards",
+      "file": "monitoring/grafana/transcriber-workers.json",
+      "destination": "Transcription/transcriber-workers.json",
+      "location": "central"
+    }
+  ],
+  "retire": [
+    {
+      "kind": "metrics",
+      "destination": "transcriber.yml",
+      "sha256": [
+        "5a718a5ec1b512be35a943955bf7627f8b4b575da92979bc24cc64e3c85fd278"
+      ],
+      "location": "central"
+    }
+  ]
+}
