@@ -17,7 +17,10 @@
       "kind": "metrics",
       "file": "monitoring/prometheus/transcriber.yml",
       "destination": "transcriber.yml",
-      "location": "local"
+      "location": "local",
+      "adopt_sha256": [
+        "5a718a5ec1b512be35a943955bf7627f8b4b575da92979bc24cc64e3c85fd278"
+      ]
     },
     {
       "kind": "dashboards",
@@ -29,16 +32,6 @@
       "kind": "dashboards",
       "file": "monitoring/grafana/transcriber-workers.json",
       "destination": "Transcription/transcriber-workers.json",
-      "location": "central"
-    }
-  ],
-  "retire": [
-    {
-      "kind": "metrics",
-      "destination": "transcriber.yml",
-      "sha256": [
-        "5a718a5ec1b512be35a943955bf7627f8b4b575da92979bc24cc64e3c85fd278"
-      ],
       "location": "central"
     }
   ]
