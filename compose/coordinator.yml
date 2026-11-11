@@ -19,7 +19,7 @@ services:
         source: ${HEADSCALE_AUTHKEY_PATH:?Provision a one-use registration key}
         target: /run/secrets/headscale-auth
         read_only: true
-        bind: {create_host_path: false}
+        bind: {create_host_path: false, propagation: rprivate}
     devices: [/dev/net/tun:/dev/net/tun]
     cap_drop: [ALL]
     cap_add: [NET_ADMIN, NET_RAW, DAC_OVERRIDE]
@@ -47,7 +47,12 @@ services:
     environment:
       WORKER_PUBLIC_GRPC_ADDR: "0.0.0.0:50056"
       WORKER_CREDENTIALS_FILE: /run/secrets/worker-credentials
-    secrets: [worker-credentials]
+    volumes:
+      - type: bind
+        source: ${WORKER_CREDENTIALS_PATH:?Set the protected worker credential registry}
+        target: /run/secrets/worker-credentials
+        read_only: true
+        bind: {create_host_path: false, propagation: rprivate}
     depends_on:
       coordinator-tailnet: {condition: service_healthy, restart: true}
     deploy:
@@ -67,8 +72,5 @@ services:
         limits:
           cpus: "1.0"
           memory: 384m
-secrets:
-  worker-credentials:
-    file: ${WORKER_CREDENTIALS_PATH:?Set the protected worker credential registry}
 volumes:
   coordinator-tailnet-state:
