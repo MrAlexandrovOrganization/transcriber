@@ -1,0 +1,74 @@
+# Docker Desktop needs its own independent, persistent tailnet identity.
+services:
+  coordinator-tailnet:
+    image: tailscale/tailscale:${TAILSCALE_VERSION:?Run via make}
+    container_name: "${CONTAINER_NAME_PREFIX:-}transcriber-coordinator-tailnet"
+    hostname: ${COORDINATOR_TAILNET_HOSTNAME:?Set a stable coordinator hostname}
+    restart: unless-stopped
+    entrypoint: [sh, /etc/transcriber/coordinator-tailnet.sh]
+    environment:
+      ROUTER_TAILNET_ADDRESS: ${ROUTER_TAILNET_ADDRESS:?Set the stable router IPv4 address}
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_USERSPACE: "false"
+      TS_AUTH_ONCE: "true"
+      TS_EXTRA_ARGS: "--login-server=${HEADSCALE_LOGIN_SERVER:?Set the existing Headscale URL} --auth-key=file:/run/secrets/headscale-auth --accept-dns=false --accept-routes=false --timeout=60s"
+    volumes:
+      - ./deploy/coordinator-tailnet.sh:/etc/transcriber/coordinator-tailnet.sh:ro
+      - coordinator-tailnet-state:/var/lib/tailscale
+      - type: bind
+        source: ${HEADSCALE_AUTHKEY_PATH:?Provision a one-use registration key}
+        target: /run/secrets/headscale-auth
+        read_only: true
+        bind: {create_host_path: false}
+    devices: [/dev/net/tun:/dev/net/tun]
+    cap_drop: [ALL]
+    cap_add: [NET_ADMIN, NET_RAW, DAC_OVERRIDE]
+    networks:
+      whisper-net:
+        aliases: [transcriber-rabbitmq]
+      prometheus-net:
+        aliases: [transcriber-metrics]
+      jaeger-net: {}
+    mem_limit: 128m
+    cpus: 0.25
+    healthcheck:
+      test: [CMD-SHELL, "tailscale status --json | grep -q '\"BackendState\": \"Running\"'"]
+      interval: 30s
+      timeout: 5s
+      retries: 6
+      start_period: 60s
+    logging:
+      driver: json-file
+      options: {max-size: 5m, max-file: "3"}
+  whisper-ingress:
+    networks: !reset []
+    ports: !reset []
+    network_mode: service:coordinator-tailnet
+    environment:
+      WORKER_PUBLIC_GRPC_ADDR: "0.0.0.0:50056"
+      WORKER_CREDENTIALS_FILE: /run/secrets/worker-credentials
+    secrets: [worker-credentials]
+    depends_on:
+      coordinator-tailnet: {condition: service_healthy, restart: true}
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512m
+  rabbitmq:
+    networks: !reset []
+    ports: !reset []
+    network_mode: service:coordinator-tailnet
+    depends_on:
+      coordinator-tailnet: {condition: service_healthy, restart: true}
+  postgres:
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 384m
+secrets:
+  worker-credentials:
+    file: ${WORKER_CREDENTIALS_PATH:?Set the protected worker credential registry}
+volumes:
+  coordinator-tailnet-state:

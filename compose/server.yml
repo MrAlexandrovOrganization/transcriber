@@ -22,7 +22,7 @@ networks:
 services:
   postgres:
     container_name: "${CONTAINER_NAME_PREFIX:-}transcriber-postgres"
-    image: postgres:${POSTGRES_VERSION:?Run via make}
+    image: ${POSTGRES_IMAGE:-postgres:${POSTGRES_VERSION:?Run via make}}
     environment:
       POSTGRES_DB: transcriber
       POSTGRES_USER: transcriber
@@ -61,6 +61,7 @@ services:
       MAX_JOB_STORAGE_BYTES: ${MAX_JOB_STORAGE_BYTES:-8589934592}
       MIN_JOB_STORAGE_FREE_BYTES: ${MIN_JOB_STORAGE_FREE_BYTES:-1073741824}
       MAX_CONCURRENT_UPLOADS: ${MAX_CONCURRENT_UPLOADS:-4}
+      REQUIRE_AVAILABLE_WORKERS: ${REQUIRE_AVAILABLE_WORKERS:-0}
       GRPC_PORT: 50053
       GRPC_WORKERS: 4
       GRPC_MAX_MESSAGE_BYTES: 52428800

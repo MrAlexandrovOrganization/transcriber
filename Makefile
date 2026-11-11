@@ -15,8 +15,8 @@ WORKER_RELEASE_ENV = $(if $(wildcard $(WORKER_RELEASE_FILE)),--env-file "$(WORKE
 # Reject obsolete SSH configurations instead of silently changing transport.
 WORKER_TRANSPORT ?= $(or $(shell sed -n 's/^WORKER_TRANSPORT=//p' $(ENV_FILE) 2>/dev/null),tls)
 WORKER_TLS_ENABLED ?= $(shell sed -n 's/^WORKER_TLS_ENABLED=//p' $(ENV_FILE) 2>/dev/null)
-ifneq ($(filter-out server workers,$(strip $(TRANSCRIBER_ROLE))),)
-$(error TRANSCRIBER_ROLE must be an unquoted server or workers)
+ifneq ($(filter-out server workers router,$(strip $(TRANSCRIBER_ROLE))),)
+$(error TRANSCRIBER_ROLE must be an unquoted server, workers or router)
 endif
 ifneq ($(filter-out tls,$(strip $(WORKER_TRANSPORT))),)
 $(error SSH worker transport was removed; use TLS)
@@ -36,6 +36,11 @@ ifneq ($(filter-out nvidia wsl-direct,$(strip $(WORKER_GPU_RUNTIME))),)
 $(error WORKER_GPU_RUNTIME must be an unquoted nvidia or wsl-direct)
 endif
 # Keep paths, default project name and volumes anchored to the checkout root.
+ifeq ($(strip $(TRANSCRIBER_ROLE)),router)
+COMPOSE_FILES = -f compose/router.yml
+IMAGE_COMPOSE_FILES = compose/router.yml
+WORKER_RELEASE_ENV =
+else
 COMPOSE_FILES = -f compose/server.yml
 IMAGE_COMPOSE_FILES = compose/server.yml
 ifeq ($(strip $(TRANSCRIBER_ROLE)),workers)
@@ -74,6 +79,12 @@ endif
 ifeq ($(strip $(TRANSCRIBER_ROLE)):$(strip $(WORKER_TAILNET)),workers:1)
 COMPOSE_FILES += -f compose/workers.tailnet.yml
 IMAGE_COMPOSE_FILES += compose/workers.tailnet.yml
+endif
+COORDINATOR_TAILNET ?= $(or $(shell sed -n 's/^COORDINATOR_TAILNET=//p' $(ENV_FILE) 2>/dev/null),0)
+ifeq ($(strip $(TRANSCRIBER_ROLE)):$(strip $(COORDINATOR_TAILNET)),server:1)
+COMPOSE_FILES += -f compose/coordinator.yml
+IMAGE_COMPOSE_FILES += compose/coordinator.yml
+endif
 endif
 export IMAGE_COMPOSE_FILES
 export IMAGE_RUNTIME_ENV_FILE := $(ENV_FILE)
@@ -150,9 +161,28 @@ logs:
 .PHONY: deploy
 ifeq ($(strip $(TRANSCRIBER_ROLE)),server)
 deploy: image-deploy
+else ifeq ($(strip $(TRANSCRIBER_ROLE)),router)
+deploy: router-up
 else
 deploy: up
 endif
+
+.PHONY: router-up router-check
+router-up: config-check
+	@test '$(TRANSCRIBER_ROLE)' = router
+	chmod 0644 deploy/router.cfg
+	$(DOCKER_COMPOSE) up -d --no-build --wait --wait-timeout 60 router
+router-check:
+	sh -n deploy/coordinator-tailnet.sh
+	docker run --rm --network none -e COORDINATOR_ADDRESS=127.0.0.1 -i --entrypoint sh haproxy:$(HAPROXY_VERSION) -c 'cat > /tmp/router.cfg; haproxy -c -f /tmp/router.cfg' < deploy/router.cfg
+
+.PHONY: test-router-docker
+test-router-docker:
+	python3 scripts/smoke_router.py
+
+.PHONY: ci-deploy-coordinator
+ci-deploy-coordinator:
+	python3 scripts/coordinator_deploy.py
 
 .PHONY: restart
 restart:
@@ -283,6 +313,8 @@ ifeq ($(strip $(TRANSCRIBER_ROLE)),workers)
 endif
 
 config-check-examples:
+	$(MAKE) ENV_FILE=.env.router.example config-check
+	$(MAKE) ENV_FILE=.env.coordinator.example config-check
 	$(MAKE) ENV_FILE=.env.wsl.example WORKER_GPU_RUNTIME=wsl-direct config-check
 	$(MAKE) ENV_FILE=.env.mac.example TRANSCRIBER_ROLE=workers config-check
 	$(MAKE) ENV_FILE=.env.wsl.example TRANSCRIBER_ROLE=workers config-check
@@ -294,7 +326,7 @@ config-check-examples:
 
 	$(MAKE) ENV_FILE=.env.wsl.example WORKER_GPU_RUNTIME=wsl-direct QUEUE_BACKEND=rabbitmq WORKER_TAILNET=1 CPU_RABBITMQ_DIR=/synthetic/rabbitmq/cpu GPU_RABBITMQ_DIR=/synthetic/rabbitmq/gpu WORKER_TAILNET_HOSTNAME=synthetic-workers HEADSCALE_LOGIN_SERVER=https://headscale.example.com HEADSCALE_AUTHKEY_PATH=/synthetic/headscale.key config-check
 
-check: proto-gen proto-check config-check config-check-examples monitoring-check forwarder-check
+check: proto-gen proto-check config-check config-check-examples monitoring-check forwarder-check router-check
 	poetry run ruff check whisper tests scripts
 	poetry run ruff format --check whisper tests scripts
 	$(MAKE) test

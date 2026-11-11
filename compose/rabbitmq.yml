@@ -1,7 +1,7 @@
 # Activated explicitly after provisioning credentials and draining SQL claimers.
 services:
   rabbitmq:
-    image: rabbitmq:${RABBITMQ_VERSION:?Run via make}
+    image: ${RABBITMQ_IMAGE:-rabbitmq:${RABBITMQ_VERSION:?Run via make}}
     container_name: "${CONTAINER_NAME_PREFIX:-}transcriber-rabbitmq"
     hostname: transcriber-rabbitmq
     environment:

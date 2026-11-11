@@ -9,6 +9,19 @@ locally. Use `make build`/`make up`: Make exports versions to Compose build args
 
 Durable asynchronous Whisper transcription service.
 
+## Russia entry point and WSL coordinator
+
+The `router` role keeps the private client endpoint, public worker TLS endpoint
+and AMQPS endpoint on the always-on Russia machine. It forwards opaque TCP to
+the independent WSL coordinator tailnet namespace; it stores no jobs, models or
+credentials. PostgreSQL, RabbitMQ and uploaded audio stay together on WSL.
+The Telegram bot and its separate database can remain on Russia.
+
+Use `.env.router.example` for Russia and `.env.coordinator.example` in a separate
+WSL checkout alongside the existing worker checkout. No inference or local
+fallback is enabled by either deployment. See [migration, outage behavior,
+verification and rollback](docs/wsl-coordinator.md).
+
 RabbitMQ delivery is implemented with a transactional outbox and direct TLS
 consumers on worker devices. Set `QUEUE_BACKEND=rabbitmq` in the coordinator
 and worker machine configurations after provisioning. Existing installations

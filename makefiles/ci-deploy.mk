@@ -22,4 +22,4 @@ ci-deploy:
 	trap 'rm -rf "$$DOCKER_CONFIG"' EXIT; \
 	printf '%s' "$$GHCR_TOKEN" | docker login ghcr.io -u "$$GHCR_USER" --password-stdin; \
 	unset GHCR_TOKEN; \
-	IMAGE_DEPLOY_LOCKED=1 make -f Makefile image-deploy
+	IMAGE_DEPLOY_LOCKED=1 make -f Makefile deploy

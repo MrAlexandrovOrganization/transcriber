@@ -1,5 +1,6 @@
 """Real gRPC + PostgreSQL tests, always in a random isolated schema."""
 
+import contextlib
 import errno
 import hashlib
 import os
@@ -32,6 +33,79 @@ DSN = os.getenv("TRANSCRIBER_TEST_DATABASE_URL")
 
 @unittest.skipUnless(DSN, "Set TRANSCRIBER_TEST_DATABASE_URL to an isolated PostgreSQL")
 class WorkerAPITests(unittest.TestCase):
+    @contextlib.contextmanager
+    def guarded_client(self):
+        server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
+        with patch.dict(os.environ, {"REQUIRE_AVAILABLE_WORKERS": "1"}):
+            service = TranscriptionServicer(self.store)
+        rpc.add_TranscriptionServiceServicer_to_server(service, server)
+        port = server.add_insecure_port("127.0.0.1:0")
+        server.start()
+        channel = grpc.insecure_channel(f"127.0.0.1:{port}")
+        try:
+            yield rpc.TranscriptionServiceStub(channel)
+        finally:
+            channel.close()
+            server.stop(0).wait()
+
+    def test_guarded_upload_rejects_outage_without_creating_a_job(self):
+        with self.guarded_client() as client:
+            start = time.monotonic()
+            with self.assertRaises(grpc.RpcError) as caught:
+                client.Submit(
+                    iter(
+                        [
+                            pb.TranscribeChunk(
+                                format="wav",
+                                data=b"synthetic",
+                                request_id="outage-test",
+                            )
+                        ]
+                    ),
+                    timeout=3,
+                )
+            self.assertEqual(caught.exception.code(), grpc.StatusCode.UNAVAILABLE)
+            self.assertLess(time.monotonic() - start, 2)
+        with self.store.connect() as conn:
+            self.assertEqual(
+                conn.execute("SELECT count(*) AS n FROM transcription_jobs").fetchone()[
+                    "n"
+                ],
+                0,
+            )
+        self.assertEqual(list(self.store.storage_root.iterdir()), [])
+
+    def test_guarded_upload_preserves_replay_status_cancel_and_ack_during_outage(self):
+        instance = str(uuid.uuid4())
+        self.report_availability("mac-primary", instance)
+        chunk = pb.TranscribeChunk(
+            format="wav",
+            data=b"synthetic",
+            request_id="preserved-test",
+            retain_until_ack=True,
+        )
+        with self.guarded_client() as client:
+            accepted = client.Submit(iter([chunk]), timeout=3)
+            self.report_availability("mac-primary", instance, ready=False)
+            replay = client.Submit(iter([chunk]), timeout=3)
+            self.assertEqual(replay.job_id, accepted.job_id)
+            self.assertEqual(
+                client.GetStatus(
+                    pb.StatusRequest(job_id=accepted.job_id), timeout=3
+                ).status,
+                pb.QUEUED,
+            )
+            self.assertTrue(
+                client.Cancel(
+                    pb.CancelRequest(job_id=accepted.job_id), timeout=3
+                ).cancelled
+            )
+            self.assertTrue(
+                client.Ack(
+                    pb.AckRequest(job_id=accepted.job_id), timeout=3
+                ).acknowledged
+            )
+
     @classmethod
     def setUpClass(cls):
         cls.engine = None

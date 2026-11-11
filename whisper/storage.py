@@ -80,6 +80,10 @@ class UploadConflict(Exception):
     """A client request ID was reused with different immutable options."""
 
 
+class WorkersUnavailable(Exception):
+    """New work cannot be accepted while every enabled worker is offline."""
+
+
 @dataclasses.dataclass(frozen=True)
 class UploadReservation:
     job: JobRecord
@@ -256,6 +260,7 @@ class JobStore:
         initial_prompt_override: str,
         traceparent: str = "",
         tracestate: str = "",
+        require_available_workers: bool = False,
     ):
         # A session lock spans streaming without keeping a database transaction
         # open. PostgreSQL releases it automatically when the process crashes.
@@ -277,6 +282,12 @@ class JobStore:
                         (request_id,),
                     ).fetchone()
                     connection.commit()
+                if (
+                    require_available_workers
+                    and (not row or row["status"] in {"accepted", "downloading"})
+                    and not self.has_available_workers()
+                ):
+                    raise WorkersUnavailable()
                 if row:
                     job = self._row_to_job(row)
                     identity = (

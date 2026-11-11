@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -36,7 +37,7 @@ jobs:
       - name: Check against the previous published contract
         run: make check
         env:
-          PROTO_BREAKING_AGAINST: .git#ref=${{ github.event.pull_request.base.sha || github.event.before }},subdir=proto
+          PROTO_BREAKING_AGAINST: .git#ref=${{ github.event.pull_request.base.sha || github.event.before || format('{0}^', github.sha) }},subdir=proto
       - name: Start isolated test database
         run: make test-db-up test-rabbit-up
       - name: Check real PostgreSQL and worker RPCs
@@ -55,6 +56,8 @@ jobs:
         run: make test-worker-tls-docker
       - name: Verify RabbitMQ TLS, credentials and safe deferred delivery
         run: make test-broker-tls-docker
+      - name: Verify router outage bounds and automatic recovery
+        run: make test-router-docker
       - name: Verify real Docker update and rollback
         run: make test-updater-docker
       - name: Build CPU and CUDA images without production credentials
@@ -77,7 +80,7 @@ jobs:
       - name: Build the server image once
         run: make image-build
       - name: Log in to GHCR
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
@@ -85,10 +88,10 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Publish the checked image
         id: publish
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         run: make image-publish
       - name: Keep the release manifest for rollback
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@v4
         with:
           name: transcriber-server-release
@@ -96,11 +99,36 @@ jobs:
           include-hidden-files: true
           retention-days: 30
 
+  coordinator:
+    name: Deploy coordinator to WSL
+    runs-on: ubuntu-24.04
+    needs: [check, app-image]
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && vars.COORDINATOR_DEPLOY_ENABLED == 'true' && !contains(github.event.head_commit.message, '[resources-only]')
+    permissions:
+      contents: read
+      packages: read
+    concurrency:
+      group: transcriber-coordinator-deploy
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v5
+      - name: Activate checked digest through Russia
+        run: make ci-deploy-coordinator
+        env:
+          COORDINATOR_TRANSPORT_JSON: ${{ secrets.COORDINATOR_TRANSPORT_JSON }}
+          COORDINATOR_SSH_KEY: ${{ secrets.COORDINATOR_SSH_KEY }}
+          COORDINATOR_KNOWN_HOSTS: ${{ secrets.COORDINATOR_KNOWN_HOSTS }}
+          DEPLOY_SHA: ${{ github.sha }}
+          IMAGE_MANIFEST_B64: ${{ needs.app-image.outputs.manifest }}
+          IMAGE_REPOSITORY: ghcr.io/${{ github.repository }}
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   deploy:
     name: Deploy to VM
     runs-on: ubuntu-24.04
-    needs: [check, app-image]
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && !contains(github.event.head_commit.message, '[resources-only]')
+    needs: [check, app-image, coordinator]
+    if: always() && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && needs.check.result == 'success' && needs.app-image.result == 'success' && (needs.coordinator.result == 'success' || needs.coordinator.result == 'skipped') && !contains(github.event.head_commit.message, '[resources-only]')
     permissions:
       contents: read
       packages: read
@@ -134,7 +162,7 @@ jobs:
   publish:
     name: Publish ${{ matrix.arch }} worker images
     needs: check
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push' && !contains(github.event.head_commit.message, '[resources-only]')
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && !contains(github.event.head_commit.message, '[resources-only]')
     strategy:
       matrix:
         include:

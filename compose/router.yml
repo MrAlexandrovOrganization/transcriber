@@ -1,0 +1,42 @@
+services:
+  router:
+    image: haproxy:${HAPROXY_VERSION:?Run via make}
+    container_name: "${CONTAINER_NAME_PREFIX:-}transcriber-router"
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp:size=1m,mode=1777]
+    environment:
+      COORDINATOR_ADDRESS: ${COORDINATOR_ADDRESS:?Set the private coordinator address}
+    volumes:
+      - ./deploy/router.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    ports:
+      - "${ROUTER_BIND_ADDRESS:?Set the private ingress address}:50053:50053"
+      - "${ROUTER_BIND_ADDRESS:?Set the private ingress address}:5671:5671"
+    networks:
+      whisper-net:
+        aliases: [whisper-ingress]
+      caddy-transcriber-net:
+        aliases: [transcriber-worker-api]
+      prometheus-net:
+        aliases: [transcriber-router-metrics]
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8404/health]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+    mem_limit: 64m
+    cpus: 0.25
+    pids_limit: 32
+    logging:
+      driver: json-file
+      options: {max-size: 5m, max-file: "3"}
+networks:
+  whisper-net:
+    external: true
+    name: whisper-net
+  caddy-transcriber-net:
+    external: true
+  prometheus-net:
+    external: true

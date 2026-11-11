@@ -30,6 +30,7 @@ from whisper.storage import (
     UploadBusy,
     UploadConflict,
     UploadReservation,
+    WorkersUnavailable,
 )
 from whisper.telemetry import context_from_carrier, current_trace_carrier
 from whisper.worker_api import start_worker_apis
@@ -54,6 +55,10 @@ class TranscriptionServicer(whisper_pb2_grpc.TranscriptionServiceServicer):
     def __init__(self, store: JobStore):
         self._store = store
         UploadLimits.from_env()  # Fail invalid configuration at startup.
+        require_workers = os.getenv("REQUIRE_AVAILABLE_WORKERS", "0")
+        if require_workers not in {"0", "1"}:
+            raise ValueError("REQUIRE_AVAILABLE_WORKERS must be 0 or 1")
+        self._require_available_workers = require_workers == "1"
 
     def GetAvailability(self, request, context):
         return whisper_pb2.AvailabilityResponse(
@@ -118,6 +123,7 @@ class TranscriptionServicer(whisper_pb2_grpc.TranscriptionServiceServicer):
                 initial_prompt_override=initial_prompt_override,
                 traceparent=trace_carrier.get("traceparent", ""),
                 tracestate=trace_carrier.get("tracestate", ""),
+                require_available_workers=self._require_available_workers,
             ) as upload:
                 return self._submit_reserved(
                     upload,
@@ -126,6 +132,11 @@ class TranscriptionServicer(whisper_pb2_grpc.TranscriptionServiceServicer):
                     context,
                     limits,
                 )
+        except WorkersUnavailable:
+            context.abort(
+                grpc.StatusCode.UNAVAILABLE,
+                "Transcription workers are unavailable; retry later",
+            )
         except UploadBusy:
             context.abort(
                 grpc.StatusCode.ABORTED,
