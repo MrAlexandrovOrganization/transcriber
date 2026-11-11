@@ -21,9 +21,11 @@ services:
       whisper-net:
         aliases: [transcriber-rabbitmq]
     healthcheck:
-      test: [CMD, su-exec, rabbitmq, rabbitmq-diagnostics, -q, check_running]
-      interval: 20s
-      timeout: 10s
+      # A CLI probe starts another Erlang VM and can accumulate under CPU pressure.
+      # Bash TCP redirection uses one process, bounded by the Docker timeout.
+      test: [CMD, bash, -ec, "exec 3<>/dev/tcp/127.0.0.1/5671; exec 3>&-; exec 3<&-"]
+      interval: 60s
+      timeout: 3s
       retries: 6
       start_period: 60s
     mem_limit: 512m

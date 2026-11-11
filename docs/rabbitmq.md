@@ -131,6 +131,16 @@ worker devices and sleeping laptops should not be broker cluster members.
 The RabbitMQ version is pinned in makefiles/versions.mk. Preserve
 whisper-rabbitmq-data and hostname when restarting or upgrading the broker.
 
+The container healthcheck opens the local AMQPS TCP listener every 60 seconds
+using a single Bash process with a three-second Docker timeout. It does not
+start an Erlang CLI VM: repeated CLI probes accumulated during CPU starvation
+on the 2-vCPU Russia host and increased CPU and memory pressure. This is a
+listener readiness check, not a TLS, authentication, queue or publish/consume
+test. Worker broker readiness, outbox metrics and the explicit end-to-end smoke
+checks cover those separate concerns. See RabbitMQ monitoring guidance:
+https://www.rabbitmq.com/docs/monitoring#health-checks.
+
+
 ## Cutover and rollback
 
 1. Back up PostgreSQL, audio and private configuration using the existing
