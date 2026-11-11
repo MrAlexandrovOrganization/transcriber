@@ -1,7 +1,7 @@
 # Activated explicitly after provisioning credentials and draining SQL claimers.
 services:
   rabbitmq:
-    image: rabbitmq:${RABBITMQ_VERSION:?Run via make}
+    image: ${RABBITMQ_IMAGE:-rabbitmq:${RABBITMQ_VERSION:?Run via make}}
     container_name: "${CONTAINER_NAME_PREFIX:-}transcriber-rabbitmq"
     hostname: transcriber-rabbitmq
     environment:
@@ -16,7 +16,7 @@ services:
         source: ${RABBITMQ_CONFIG_DIR:?Provision RabbitMQ configuration first}
         target: /etc/rabbitmq
         read_only: true
-        bind: {create_host_path: false}
+        bind: {create_host_path: false, propagation: rprivate}
     networks:
       whisper-net:
         aliases: [transcriber-rabbitmq]
@@ -43,7 +43,7 @@ services:
         source: ${RABBITMQ_PUBLISHER_DIR:?Provision publisher credentials first}
         target: /run/rabbitmq
         read_only: true
-        bind: {create_host_path: false}
+        bind: {create_host_path: false, propagation: rprivate}
     depends_on:
       rabbitmq:
         condition: service_healthy
