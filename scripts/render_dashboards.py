@@ -32,6 +32,9 @@ def panel(
         }
         for i, (expr, legend) in enumerate(queries)
     ]
+    for target in targets:
+        if "$__rate_interval" in target["expr"]:
+            target["interval"] = "60s"
     return {
         "title": title,
         "type": kind,
@@ -545,7 +548,7 @@ def main():
                 for target in item["targets"]:
                     expression = (
                         target["expr"]
-                        .replace("$__rate_interval", "1m")
+                        .replace("$__rate_interval", "4m")
                         .replace("$__range", "6h")
                         .replace("$worker", ".*")
                     )

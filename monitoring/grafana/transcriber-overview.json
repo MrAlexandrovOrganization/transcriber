@@ -710,7 +710,8 @@
             "uid": "prometheus"
           },
           "range": true,
-          "instant": false
+          "instant": false,
+          "interval": "60s"
         }
       ],
       "fieldConfig": {
@@ -774,7 +775,8 @@
             "uid": "prometheus"
           },
           "range": true,
-          "instant": false
+          "instant": false,
+          "interval": "60s"
         },
         {
           "refId": "B",
@@ -785,7 +787,8 @@
             "uid": "prometheus"
           },
           "range": true,
-          "instant": false
+          "instant": false,
+          "interval": "60s"
         },
         {
           "refId": "C",
@@ -796,7 +799,8 @@
             "uid": "prometheus"
           },
           "range": true,
-          "instant": false
+          "instant": false,
+          "interval": "60s"
         }
       ],
       "fieldConfig": {
@@ -860,7 +864,8 @@
             "uid": "prometheus"
           },
           "range": true,
-          "instant": false
+          "instant": false,
+          "interval": "60s"
         },
         {
           "refId": "B",
@@ -871,7 +876,8 @@
             "uid": "prometheus"
           },
           "range": true,
-          "instant": false
+          "instant": false,
+          "interval": "60s"
         },
         {
           "refId": "C",
@@ -882,7 +888,8 @@
             "uid": "prometheus"
           },
           "range": true,
-          "instant": false
+          "instant": false,
+          "interval": "60s"
         }
       ],
       "fieldConfig": {

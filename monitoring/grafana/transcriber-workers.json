@@ -819,7 +819,8 @@
             "uid": "prometheus"
           },
           "range": true,
-          "instant": false
+          "instant": false,
+          "interval": "60s"
         }
       ],
       "fieldConfig": {
@@ -883,7 +884,8 @@
             "uid": "prometheus"
           },
           "range": true,
-          "instant": false
+          "instant": false,
+          "interval": "60s"
         }
       ],
       "fieldConfig": {
@@ -1139,7 +1141,8 @@
             "uid": "prometheus"
           },
           "range": true,
-          "instant": false
+          "instant": false,
+          "interval": "60s"
         }
       ],
       "fieldConfig": {
